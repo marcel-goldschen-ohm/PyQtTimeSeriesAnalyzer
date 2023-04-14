@@ -498,9 +498,6 @@ class QtTimeSeriesAnalyzer(QWidget):
 
 
 if __name__ == '__main__':
-    import sys
-    from PyQt5.QtWidgets import QApplication
-
     # Create the application
     app = QApplication(sys.argv)
 
@@ -524,4 +521,5 @@ if __name__ == '__main__':
 
     # Show widget and run application
     widget.show()
-    sys.exit(app.exec())
+    exitStatus = app.exec()
+    sys.exit(exitStatus)
