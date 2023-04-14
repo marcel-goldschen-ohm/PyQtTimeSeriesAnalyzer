@@ -1,21 +1,34 @@
 """
+PyQtTimeSeriesAnalyzer.py
+
+Very much still a work in progress.
+
 TODO:
+- add fit lines to data set
+- UI to edit data table
+- load/save data in Matlab format
+- requirements.txt
+- detailed instructions in the associated README.md file
 """
 
+
+__author__ = "Marcel P. Goldschen-Ohm"
+__author_email__ = "goldschen-ohm@utexas.edu, marcel.goldschen@gmail.com"
+
+
 try:
-    from PyQt5.QtCore import Qt  #, QRectF, QPoint, QPointF, pyqtSignal, QEvent, QSize
-    from PyQt5.QtGui import QColor, QFont, QPalette  #, QImage, QPixmap, QPainterPath, QMouseEvent, QPainter, QPen
-    from PyQt5.QtWidgets import QWidget, QGridLayout, QVBoxLayout, QHBoxLayout, QMenu, QLineEdit, QPushButton, QToolBar, QToolButton, \
-        QInputDialog, QAbstractItemView, QListWidget, QWidgetAction
+    from PyQt5.QtCore import *
+    from PyQt5.QtGui import *
+    from PyQt5.QtWidgets import *
 except ImportError:
     raise ImportError("Requires PyQt5")
 
 import sys
+import re
 import numpy as np
 import pandas as pd
-from scipy import interpolate
+import scipy as sp
 import pyqtgraph as pg
-import re
 
 
 pg.setConfigOption('foreground', 'k')   # Default foreground color for text, lines, axes, etc.
@@ -139,8 +152,8 @@ class CustomViewBox(pg.ViewBox):
                 p = np.polyfit(fx, fy, fitParams['degree'])
                 yfit = np.polyval(p, xfit)
             elif fitType == "spline":
-                tck = interpolate.splrep(fx, fy, s=fitParams['smoothing'])
-                yfit = interpolate.splev(xfit, tck, der=0)
+                tck = sp.interpolate.splrep(fx, fy, s=fitParams['smoothing'])
+                yfit = sp.interpolate.splev(xfit, tck, der=0)
             elif fitType == "custom":
                 pass
 
@@ -219,11 +232,11 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._visibleGroupsButton.menu().addAction(action)
 
         # traversal over time series within each group
-        self._seriesIndexEdit = QLineEdit()
-        self._seriesIndexEdit.setMinimumWidth(50)
-        self._seriesIndexEdit.setMaximumWidth(150)
-        self._seriesIndexEdit.setToolTip("Current series")
-        self._seriesIndexEdit.textEdited.connect(self.updatePlots)
+        self._visibleSeriesIndexEdit = QLineEdit()
+        self._visibleSeriesIndexEdit.setMinimumWidth(50)
+        self._visibleSeriesIndexEdit.setMaximumWidth(150)
+        self._visibleSeriesIndexEdit.setToolTip("Current series")
+        self._visibleSeriesIndexEdit.textEdited.connect(self.updatePlots)
 
         self._prevSeriesButton = QPushButton("<")
         self._prevSeriesButton.setMaximumWidth(35)
@@ -240,19 +253,17 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._mainGridLayout.setContentsMargins(3, 3, 3, 3)
         self._mainGridLayout.setSpacing(0)
 
-        self._topToolbar = QToolBar() #QHBoxLayout()
+        self._topToolbar = QToolBar()
         self._visibleGroupsButtonAction = self._topToolbar.addWidget(self._visibleGroupsButton)
-        self._seriesIndexEditAction = self._topToolbar.addWidget(self._seriesIndexEdit)
+        self._seriesIndexEditAction = self._topToolbar.addWidget(self._visibleSeriesIndexEdit)
         self._prevSeriesButtonAction = self._topToolbar.addWidget(self._prevSeriesButton)
         self._nextSeriesButtonAction = self._topToolbar.addWidget(self._nextSeriesButton)
-        # self._plotsTopToolbarHBoxLayout.addStretch()
-        # self._mainGridLayout.addLayout(self._plotsTopToolbarHBoxLayout, 0, 0)
         self._mainGridLayout.addWidget(self._topToolbar, 0, 0)
 
-        self._plotsVBoxLayout = QVBoxLayout()
-        self._plotsVBoxLayout.setContentsMargins(3, 3, 3, 3)
-        self._plotsVBoxLayout.setSpacing(3)
-        self._mainGridLayout.addLayout(self._plotsVBoxLayout, 1, 0)
+        self._groupPlotsVBoxLayout = QVBoxLayout()
+        self._groupPlotsVBoxLayout.setContentsMargins(3, 3, 3, 3)
+        self._groupPlotsVBoxLayout.setSpacing(3)
+        self._mainGridLayout.addLayout(self._groupPlotsVBoxLayout, 1, 0)
     
     def numSeries(self) -> int:
         return len(self.data)
@@ -274,7 +285,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         return names
     
     def _groupPlots(self) -> list:
-        return [self._plotsVBoxLayout.itemAt(i).widget() for i in range(self._plotsVBoxLayout.count())]
+        return [self._groupPlotsVBoxLayout.itemAt(i).widget() for i in range(self._groupPlotsVBoxLayout.count())]
     
     def visibleGroupIndexes(self) -> list:
         indexes = [index.row() for index in self._visibleGroupsListWidget.selectedIndexes()]
@@ -303,7 +314,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         allGroupIndexes = list(range(len(self.groups())))
         invisibleGroupIndexes = np.setdiff1d(allGroupIndexes, visibleGroupIndexes)
         for i in allGroupIndexes:
-            plot = self._plotsVBoxLayout.itemAt(i).widget()
+            plot = self._groupPlotsVBoxLayout.itemAt(i).widget()
             if i in invisibleGroupIndexes:
                 plot.hide()
             else:
@@ -335,7 +346,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         if self.numSeries() == 0:
             return []
         n_series_max = self.maxVisibleSeries()
-        visibleSeriesText = self._seriesIndexEdit.text().strip()
+        visibleSeriesText = self._visibleSeriesIndexEdit.text().strip()
         if visibleSeriesText == '':
             return list(range(n_series_max))
         visibleSeriesFields = re.split('[,\s]+', visibleSeriesText)
@@ -358,7 +369,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         return list(indexes)
     
     def setVisibleSeriesIndexes(self, indexes):
-        self._seriesIndexEdit.setText(' '.join([str(i) for i in indexes]))
+        self._visibleSeriesIndexEdit.setText(' '.join([str(i) for i in indexes]))
         self.updatePlots()
     
     def goToNextSeries(self):
@@ -382,20 +393,18 @@ class QtTimeSeriesAnalyzer(QWidget):
         groups = self.groups()
         n_groups = len(groups)
         for i, seriesIndexes in enumerate(self.visibleGroupSeriesIndexes(groups)):
-            print("group", i, seriesIndexes)
-            if self._plotsVBoxLayout.count() > i:
+            if self._groupPlotsVBoxLayout.count() > i:
                 # use existing plot
-                plot = self._plotsVBoxLayout.itemAt(i).widget()
+                plot = self._groupPlotsVBoxLayout.itemAt(i).widget()
             else:
                 # append new plot
                 plot = self.newPlot()
-                self._plotsVBoxLayout.addWidget(plot, stretch=1)
+                self._groupPlotsVBoxLayout.addWidget(plot, stretch=1)
             
             # get data for this group
             dataItems = plot.listDataItems()
             colormap = self.styles['lines']['colormap']
             for j, index in enumerate(seriesIndexes):
-                print("series", j, index)
                 # data to plot
                 x = self.data.x[index]
                 y = self.data.y[index]
@@ -424,15 +433,15 @@ class QtTimeSeriesAnalyzer(QWidget):
                 dataItems[j].deleteLater()
         
         # remove extra plots
-        while self._plotsVBoxLayout.count() > n_groups:
-            self._plotsVBoxLayout.takeAt(n_groups).deleteLater()
+        while self._groupPlotsVBoxLayout.count() > n_groups:
+            self._groupPlotsVBoxLayout.takeAt(n_groups).deleteLater()
         
         # link x-axis
-        if self._plotsVBoxLayout.count() > 0:
-            firstItem = self._plotsVBoxLayout.itemAt(0)
-            firstPlot = self._plotsVBoxLayout.itemAt(0).widget()
-            for i in range(1, self._plotsVBoxLayout.count()):
-                plot = self._plotsVBoxLayout.itemAt(i).widget()
+        if self._groupPlotsVBoxLayout.count() > 0:
+            firstItem = self._groupPlotsVBoxLayout.itemAt(0)
+            firstPlot = self._groupPlotsVBoxLayout.itemAt(0).widget()
+            for i in range(1, self._groupPlotsVBoxLayout.count()):
+                plot = self._groupPlotsVBoxLayout.itemAt(i).widget()
                 plot.setXLink(firstPlot)
     
     def updateUI(self):
