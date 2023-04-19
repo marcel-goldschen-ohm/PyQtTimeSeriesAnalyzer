@@ -26,7 +26,6 @@ except ImportError:
 import sys
 import re
 import numpy as np
-import pandas as pd
 import scipy as sp
 import pyqtgraph as pg
 
@@ -66,6 +65,12 @@ class CustomViewBox(pg.ViewBox):
         self.menu.addMenu(self._roiMenu)
         self.menu.addMenu(self._fitMenu)
         self.menu.addSeparator()
+    
+    def group(self):
+        groups = self.tsa.groups()
+        for i, plot in enumerate(self.tsa._groupPlots()):
+            if self is plot.getPlotItem().getViewBox():
+                return groups[i]
     
     def addROI(self, orientation="vertical", limits=None):
         if limits is None:
@@ -124,6 +129,8 @@ class CustomViewBox(pg.ViewBox):
 
         # fit each data item
         dataItems = self.listDataItems()
+        fits = []
+        group = self.group()
         for dataItem in dataItems:
             x, y = dataItem.getData()  # ??? x, y = dataItem.getOriginalData() ???
             
@@ -157,9 +164,19 @@ class CustomViewBox(pg.ViewBox):
             elif fitType == "custom":
                 pass
 
+            # fit series data
+            fits.append({'x': xfit, 'y': yfit, 'group': group})
+
             # add fit to plot
             fitItem = pg.PlotDataItem(x=xfit, y=yfit, pen=pg.mkPen(color=(255, 0, 0), width=3))
             self.addItem(fitItem)
+        
+        # keep fits?
+        keepFits = QMessageBox.question(self.parentWidget().parentWidget(), "Keep Fits?", "Keep fits?", QMessageBox.Yes | QMessageBox.No)
+        if keepFits == QMessageBox.Yes:
+            self.tsa.dataSeries.extend(fits)
+        
+        self.tsa.updatePlots()
 
 
 class CustomPlotWidget(pg.PlotWidget):
@@ -174,17 +191,8 @@ class QtTimeSeriesAnalyzer(QWidget):
     def __init__(self):
         QWidget.__init__(self)
 
-        # data: each row is a time series
-        # All time series in a given group are associated with the same plot axes.
-        self.data = pd.DataFrame({
-            'x': pd.Series(dtype='object'),  # numpy array or float
-            'y': pd.Series(dtype='object'),  # numpy array
-            'xlabel': pd.Series(dtype='str'),
-            'ylabel': pd.Series(dtype='str'),
-            'group': pd.Series(dtype='int'),  # group id
-            'style': pd.Series(dtype='object'),  # dictionary of plot graphics styles
-            'tags': pd.Series(dtype='str')  # comma-separated tags
-        })
+        # list of time series dictionaries
+        self.dataSeries = []
 
         # plot styles
         self.styles = {}
@@ -219,7 +227,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         # visible group selection
         self._visibleGroupsListWidget = QListWidget()
         self._visibleGroupsListWidget.setSelectionMode(QAbstractItemView.MultiSelection)
-        self._visibleGroupsListWidget.itemSelectionChanged.connect(self.onVisibleGroupsChanged)
+        self._visibleGroupsListWidget.itemSelectionChanged.connect(self._onVisibleGroupsChanged)
 
         self._visibleGroupsButton = QToolButton()
         self._visibleGroupsButton.setText(u"\U0001F441")
@@ -231,22 +239,22 @@ class QtTimeSeriesAnalyzer(QWidget):
         action.setDefaultWidget(self._visibleGroupsListWidget)
         self._visibleGroupsButton.menu().addAction(action)
 
-        # traversal over time series within each group
-        self._visibleSeriesIndexEdit = QLineEdit()
-        self._visibleSeriesIndexEdit.setMinimumWidth(50)
-        self._visibleSeriesIndexEdit.setMaximumWidth(150)
-        self._visibleSeriesIndexEdit.setToolTip("Current series")
-        self._visibleSeriesIndexEdit.textEdited.connect(self.updatePlots)
+        # traversal over time series within each group (i.e., sweeps)
+        self._visibleSweepsIndexEdit = QLineEdit()
+        self._visibleSweepsIndexEdit.setMinimumWidth(50)
+        self._visibleSweepsIndexEdit.setMaximumWidth(150)
+        self._visibleSweepsIndexEdit.setToolTip("Current series")
+        self._visibleSweepsIndexEdit.textEdited.connect(self.updatePlots)
 
-        self._prevSeriesButton = QPushButton("<")
-        self._prevSeriesButton.setMaximumWidth(35)
-        self._prevSeriesButton.setToolTip("Previous series")
-        self._prevSeriesButton.clicked.connect(self.goToPreviousSeries)
+        self._prevSweepButton = QPushButton("<")
+        self._prevSweepButton.setMaximumWidth(35)
+        self._prevSweepButton.setToolTip("Previous series")
+        self._prevSweepButton.clicked.connect(self.prevSweep)
 
-        self._nextSeriesButton = QPushButton(">")
-        self._nextSeriesButton.setMaximumWidth(35)
-        self._nextSeriesButton.setToolTip("Next series")
-        self._nextSeriesButton.clicked.connect(self.goToNextSeries)
+        self._nextSweepButton = QPushButton(">")
+        self._nextSweepButton.setMaximumWidth(35)
+        self._nextSweepButton.setToolTip("Next series")
+        self._nextSweepButton.clicked.connect(self.nextSweep)
 
         # layout
         self._mainGridLayout = QGridLayout(self)
@@ -255,9 +263,9 @@ class QtTimeSeriesAnalyzer(QWidget):
 
         self._topToolbar = QToolBar()
         self._visibleGroupsButtonAction = self._topToolbar.addWidget(self._visibleGroupsButton)
-        self._seriesIndexEditAction = self._topToolbar.addWidget(self._visibleSeriesIndexEdit)
-        self._prevSeriesButtonAction = self._topToolbar.addWidget(self._prevSeriesButton)
-        self._nextSeriesButtonAction = self._topToolbar.addWidget(self._nextSeriesButton)
+        self._seriesIndexEditAction = self._topToolbar.addWidget(self._visibleSweepsIndexEdit)
+        self._prevSeriesButtonAction = self._topToolbar.addWidget(self._prevSweepButton)
+        self._nextSeriesButtonAction = self._topToolbar.addWidget(self._nextSweepButton)
         self._mainGridLayout.addWidget(self._topToolbar, 0, 0)
 
         self._groupPlotsVBoxLayout = QVBoxLayout()
@@ -266,98 +274,117 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._mainGridLayout.addLayout(self._groupPlotsVBoxLayout, 1, 0)
     
     def numSeries(self) -> int:
-        return len(self.data)
+        return len(self.dataSeries)
+    
+    def addSeries(self, **kwargs):
+        seriesDict = kwargs
+        self.dataSeries.append(seriesDict)
+        self.updateUI()
+    
+    def addListOfSeries(self, dataSeries: list):
+        self.dataSeries.extend(dataSeries)
+        self.updateUI()
+    
+    def _seriesAttr(self, series: dict, attr):
+        if attr == 'x':
+            if 'x' in series:
+                x = series['x']
+                if len(x) == 1 and 'y' in series:
+                    n = len(series['y'])
+                    if n > 1:
+                        x = np.arange(n) * x
+                return x
+            elif 'y' in series:
+                return np.arange(len(series['y']))
+        elif attr == 'group':
+            return series[attr] if attr in series else ''
+        elif attr == 'xlabel':
+            return series[attr] if attr in series else ''
+        elif attr == 'ylabel':
+            return series[attr] if attr in series else ''
     
     def groups(self) -> list:
-        self.data.group = self.data.group.fillna(0).astype(int)
-        return self.data.group.unique()
+        groups = []
+        for series in self.dataSeries:
+            group = self._seriesAttr(series, 'group')
+            if group not in groups:
+                groups.append(group)
+        return groups
     
-    def groupNames(self, groups=None) -> list:
+    def _groupedSeriesIndexes(self, groups=None) -> dict:
         if groups is None:
             groups = self.groups()
-        names = []
+        allSeriesGroups = np.array([
+            self._seriesAttr(series, 'group')
+            for series in self.dataSeries
+            ])
+        groupedSeriesIndexes = {}
         for group in groups:
-            if isinstance(group, str):
-                names.append(group)
+            groupedSeriesIndexes[group] = np.where(allSeriesGroups == group)[0]
+        return groupedSeriesIndexes
+    
+    def _withinGroupSweepIndex(self, seriesIndex: int) -> int:
+        seriesGroup = self._seriesAttr(self.dataSeries[seriesIndex], 'group')
+        groupedSeriesIndexes = self._groupedSeriesIndexes([seriesGroup])
+        return np.where(groupedSeriesIndexes[seriesGroup] == seriesIndex)[0][0]
+    
+    def visibleGroups(self) -> list:
+        groups = self.groups()
+        visibleGroupIndexes = [index.row() for index in self._visibleGroupsListWidget.selectedIndexes()]
+        visibleGroups = [groups[i] for i in visibleGroupIndexes if i < len(groups)]
+        if len(visibleGroups) == 0:
+            visibleGroups = groups
+        return visibleGroups
+    
+    def setVisibleGroups(self, visibleGroups):
+        groups = self.groups()
+        self._visibleGroupsListWidget.itemSelectionChanged.disconnect()
+        self._visibleGroupsListWidget.clear()
+        self._visibleGroupsListWidget.addItems([str(group) for group in groups])
+        for group in visibleGroups:
+            if group in groups:
+                self._visibleGroupsListWidget.item(groups.index(group)).setSelected(True)
+        self._visibleGroupsListWidget.itemSelectionChanged.connect(self._onVisibleGroupsChanged)
+        self._onVisibleGroupsChanged()
+    
+    def _updateVisibleGroupsListView(self):
+        visibleGroupIndexes = [index.row() for index in self._visibleGroupsListWidget.selectedIndexes()]
+        self._visibleGroupsListWidget.itemSelectionChanged.disconnect()
+        self._visibleGroupsListWidget.clear()
+        self._visibleGroupsListWidget.addItems([str(group) for group in self.groups()])
+        for i in visibleGroupIndexes:
+            if i < len(self.groups()):
+                self._visibleGroupsListWidget.item(i).setSelected(True)
+        self._visibleGroupsListWidget.itemSelectionChanged.connect(self._onVisibleGroupsChanged)
+    
+    def _onVisibleGroupsChanged(self):
+        groups = self.groups()
+        visibleGroups = self.visibleGroups()
+        for i, plot in enumerate(self._groupPlots()):
+            if i < len(groups) and groups[i] in visibleGroups:
+                plot.show()
             else:
-                row = np.where(self.data.group == group)[0][0]
-                names.append(self.data.loc[row, 'ylabel'])
-        return names
+                plot.hide()
     
     def _groupPlots(self) -> list:
         return [self._groupPlotsVBoxLayout.itemAt(i).widget() for i in range(self._groupPlotsVBoxLayout.count())]
     
-    def visibleGroupIndexes(self) -> list:
-        indexes = [index.row() for index in self._visibleGroupsListWidget.selectedIndexes()]
-        if len(indexes) == 0:
-            indexes = list(range(len(self.groups())))
-        return indexes
-    
-    def visibleGroups(self) -> list:
-        groups = self.groups()
-        return [groups[i] for i in self.visibleGroupIndexes()]
-    
-    def updateVisibleGroupsListView(self):
-        visibleGroupIndexes = [index.row() for index in self._visibleGroupsListWidget.selectedIndexes()]
-        if len(visibleGroupIndexes) == 0:
-            visibleGroupIndexes = list(range(len(self.groups())))
-        self._visibleGroupsListWidget.itemSelectionChanged.disconnect()
-        self._visibleGroupsListWidget.clear()
-        self._visibleGroupsListWidget.addItems(self.groupNames(self.groups()))
-        for i in visibleGroupIndexes:
-            if i < len(self.groups()):
-                self._visibleGroupsListWidget.item(i).setSelected(True)
-        self._visibleGroupsListWidget.itemSelectionChanged.connect(self.onVisibleGroupsChanged)
-    
-    def onVisibleGroupsChanged(self):
-        visibleGroupIndexes = self.visibleGroupIndexes()
-        allGroupIndexes = list(range(len(self.groups())))
-        invisibleGroupIndexes = np.setdiff1d(allGroupIndexes, visibleGroupIndexes)
-        for i in allGroupIndexes:
-            plot = self._groupPlotsVBoxLayout.itemAt(i).widget()
-            if i in invisibleGroupIndexes:
-                plot.hide()
-            else:
-                plot.show()
-    
-    def groupSeriesIndexes(self, groups=None) -> list:
-        if groups is None:
-            groups = self.groups()
-        indexes = []
-        for group in groups:
-            indexes.append(np.where(self.data.group == group)[0])
-        return indexes
-    
-    def visibleGroupSeriesIndexes(self, groups=None) -> list:
-        if groups is None:
-            groups = self.groups()
-        visibleIndexes = self.visibleSeriesIndexes()
-        indexes = []
-        for group in groups:
-            groupSeriesIndexes = np.where(self.data.group == group)[0]
-            indexes.append([groupSeriesIndexes[i] for i in visibleIndexes if i < len(groupSeriesIndexes)])
-        return indexes
-    
-    def maxVisibleSeries(self) -> int:
-        visibleGroupSeriesIndexes = self.groupSeriesIndexes(self.visibleGroups())
-        return np.max([len(indexes) for indexes in visibleGroupSeriesIndexes])
-    
-    def visibleSeriesIndexes(self) -> list:
+    def visibleSweepIndexes(self) -> list:
         if self.numSeries() == 0:
             return []
-        n_series_max = self.maxVisibleSeries()
-        visibleSeriesText = self._visibleSeriesIndexEdit.text().strip()
-        if visibleSeriesText == '':
-            return list(range(n_series_max))
-        visibleSeriesFields = re.split('[,\s]+', visibleSeriesText)
+        numSweepsMax = self._numVisibleSweepsMax()
+        visibleSweepsText = self._visibleSweepsIndexEdit.text().strip()
+        if visibleSweepsText == '':
+            return list(range(numSweepsMax))
+        visibleSweepsFields = re.split('[,\s]+', visibleSweepsText)
         indexes = []
-        for field in visibleSeriesFields:
+        for field in visibleSweepsFields:
             if field == '':
                 continue
             if ':' in field:
                 sliceArgs = [int(arg) if len(arg.strip()) else None for arg in field.split(':')]
                 sliceObj = slice(*sliceArgs)
-                sliceIndexes = list(range(*sliceObj.indices(n_series_max)))
+                sliceIndexes = list(range(*sliceObj.indices(numSweepsMax)))
                 indexes.extend(sliceIndexes)
             elif '-' in field:
                 start, end = field.split('-')
@@ -368,31 +395,38 @@ class QtTimeSeriesAnalyzer(QWidget):
         indexes = indexes[indexes >= 0]
         return list(indexes)
     
-    def setVisibleSeriesIndexes(self, indexes):
-        self._visibleSeriesIndexEdit.setText(' '.join([str(i) for i in indexes]))
+    def setVisibleSweepIndexes(self, sweepIndexes):
+        self._visibleSweepsIndexEdit.setText(' '.join([str(i) for i in sweepIndexes]))
         self.updatePlots()
     
-    def goToNextSeries(self):
-        indexes = self.visibleSeriesIndexes()
+    def nextSweep(self):
+        indexes = self.visibleSweepIndexes()
         if len(indexes) == 0:
             nextIndex = 0
         else:
-            nextIndex = min(indexes[-1] + 1, self.maxVisibleSeries() - 1)
-        self.setVisibleSeriesIndexes([nextIndex])
+            nextIndex = min(indexes[-1] + 1, self._numVisibleSweepsMax() - 1)
+        self.setVisibleSweepIndexes([nextIndex])
     
-    def goToPreviousSeries(self):
-        indexes = self.visibleSeriesIndexes()
+    def prevSweep(self):
+        indexes = self.visibleSweepIndexes()
         if len(indexes) == 0:
-            prevIndex = self.maxVisibleSeries() - 1
+            prevIndex = self._numVisibleSweepsMax() - 1
         else:
             prevIndex = max(0, indexes[0] - 1)
-        self.setVisibleSeriesIndexes([prevIndex])
+        self.setVisibleSweepIndexes([prevIndex])
+    
+    def _numVisibleSweepsMax(self) -> int:
+        visibleGroupSeriesIndexes = self._groupedSeriesIndexes(self.visibleGroups())
+        return np.max([len(indexes) for indexes in visibleGroupSeriesIndexes.values()])
 
     def updatePlots(self):
         # one plot per group, arranged vertically
         groups = self.groups()
         n_groups = len(groups)
-        for i, seriesIndexes in enumerate(self.visibleGroupSeriesIndexes(groups)):
+        visibleGroups = self.visibleGroups()
+        groupedSeriesIndexes = self._groupedSeriesIndexes()
+        visibleSweepIndexes = self.visibleSweepIndexes()
+        for i, group in enumerate(groups):
             if self._groupPlotsVBoxLayout.count() > i:
                 # use existing plot
                 plot = self._groupPlotsVBoxLayout.itemAt(i).widget()
@@ -404,10 +438,14 @@ class QtTimeSeriesAnalyzer(QWidget):
             # get data for this group
             dataItems = plot.listDataItems()
             colormap = self.styles['lines']['colormap']
+            seriesIndexes = [groupedSeriesIndexes[group][i] for i in visibleSweepIndexes if i < len(groupedSeriesIndexes[group])]
             for j, index in enumerate(seriesIndexes):
                 # data to plot
-                x = self.data.x[index]
-                y = self.data.y[index]
+                series = self.dataSeries[index]
+                x = self._seriesAttr(series, 'x')
+                y = series['y']
+                xlabel = self._seriesAttr(series, 'xlabel')
+                ylabel = self._seriesAttr(series, 'ylabel')
                 color = colormap[j % len(colormap)]
                 lineWidth = self.styles['lines']['width']
                 linePen = pg.mkPen(color, width=lineWidth)
@@ -421,10 +459,15 @@ class QtTimeSeriesAnalyzer(QWidget):
                     plot.plot(x, y, pen=linePen)
                 
                 # axis labels
-                # if i == len(groups) - 1:
-                plot.getAxis('bottom').setLabel(self.data.xlabel[index])
+                plot.getAxis('bottom').setLabel(xlabel)
                 if j == 0:
-                    plot.getAxis('left').setLabel(self.data.ylabel[index])
+                    plot.getAxis('left').setLabel(ylabel)
+                
+                # show/hide plot
+                if group in visibleGroups:
+                    plot.show()
+                else:
+                    plot.hide()
             
             # remove extra plot items
             dataItems = plot.listDataItems()
@@ -449,8 +492,8 @@ class QtTimeSeriesAnalyzer(QWidget):
         self.updatePlots()
         
         # show/hide group plots
-        self.updateVisibleGroupsListView()
-        self.onVisibleGroupsChanged()
+        self._updateVisibleGroupsListView()
+        self._onVisibleGroupsChanged()
 
         # visible group selection controls
         if len(self.groups()) > 1:
@@ -459,7 +502,7 @@ class QtTimeSeriesAnalyzer(QWidget):
             self._visibleGroupsButtonAction.setVisible(False)
         
         # series traversal controls
-        if self.maxVisibleSeries() > 1:
+        if self._numVisibleSweepsMax() > 1:
             self._seriesIndexEditAction.setVisible(True)
             self._prevSeriesButtonAction.setVisible(True)
             self._nextSeriesButtonAction.setVisible(True)
@@ -508,16 +551,10 @@ if __name__ == '__main__':
     widget = QtTimeSeriesAnalyzer()
 
     # testing
-    widget.data = widget.data.append({'x': np.arange(100), 'y': np.random.random(100), 'group': 0, 'xlabel': "Time", 'xunits': "s", 'ylabel': "Current", 'yunits': "pA"}, ignore_index=True)
-    widget.data = widget.data.append({'x': np.arange(100), 'y': np.random.random(100) * 1e5, 'group': 1, 'xlabel': "Time", 'xunits': "s", 'ylabel': "Voltage", 'yunits': "mV"}, ignore_index=True)
-    widget.data = widget.data.append({'x': np.arange(100), 'y': np.random.random(100), 'group': 0, 'xlabel': "Time", 'xunits': "s", 'ylabel': "Current", 'yunits': "pA"}, ignore_index=True)
-    widget.data = widget.data.append({'x': np.arange(100), 'y': np.random.random(100) * 1e5, 'group': 1, 'xlabel': "Time", 'xunits': "s", 'ylabel': "Voltage", 'yunits': "mV"}, ignore_index=True)
-    widget.updateUI()
-    # widget.data = widget.data.drop(widget.data.index[-1])
-    # widget.data = widget.data.drop(widget.data.index[-1])
-    # widget.updateUI()
-
-    # print(widget._plotsVBoxLayout.itemAt(0).widget().getViewBox().listDataItems())
+    widget.addSeries(x=np.arange(100), y=np.random.random(100), xlabel="Time, s", ylabel="Current, pA", group="Current")
+    widget.addSeries(x=np.arange(100), y=np.random.random(100), xlabel="Time, s", ylabel="Voltage, mV", group="Voltage")
+    widget.addSeries(x=np.arange(100), y=np.random.random(100), xlabel="Time, s", ylabel="Current, pA", group="Current")
+    widget.addSeries(x=np.arange(100), y=np.random.random(100), xlabel="Time, s", ylabel="Voltage, mV", group="Voltage")
 
     # Show widget and run application
     widget.show()
