@@ -8,9 +8,11 @@ TODO:
 - zero, interpolate, mask
 - series math
 - ROI measurements
+- add attr via table view
 - hidden series (or just episodes)?
 - series tags
 - load/save data in Matlab format
+- data item context menu
 - requirements.txt
 - detailed instructions in the associated README.md file
 """
@@ -29,6 +31,7 @@ except ImportError:
 
 import sys
 import re
+import ast
 import numpy as np
 import scipy as sp
 import pyqtgraph as pg
@@ -98,10 +101,20 @@ class CustomViewBox(pg.ViewBox):
         # Regions of Interest (ROIs)
         self.ROIs = []
 
+        # Measurement context menu
+        self._measureMenu = QMenu("Measure")
+        self._measureMenu.addAction("Mean", lambda: self.measure(measurementType="mean"))
+        self._measureMenu.addAction("Median", lambda: self.measure(measurementType="median"))
+        self._measureMenu.addAction("Min", lambda: self.measure(measurementType="min"))
+        self._measureMenu.addAction("Max", lambda: self.measure(measurementType="max"))
+        self._measureMenu.addAction("AbsMax", lambda: self.measure(measurementType="absmax"))
+
         # ROI context menu
         self._roiMenu = QMenu("ROI")
         self._roiMenu.addAction("Add X axis ROI", lambda: self.addROI(orientation="vertical"))
         self._roiMenu.addAction("Add Y axis ROI", lambda: self.addROI(orientation="horizontal"))
+        self._roiMenu.addSeparator()
+        self._roiMenu.addMenu(self._measureMenu)
         self._roiMenu.addSeparator()
         self._roiMenu.addAction("Show ROIs", self.showROIs)
         self._roiMenu.addAction("Hide ROIs", self.hideROIs)
@@ -111,11 +124,11 @@ class CustomViewBox(pg.ViewBox):
 
         # Curve fit context menu
         self._fitMenu = QMenu("Curve Fit")
-        self._fitMenu.addAction("Mean", lambda: self.curveFit(fitType="mean", restrictOptimizationToROIs=True, restrictOutputToROIs=False))
-        self._fitMenu.addAction("Line", lambda: self.curveFit(fitType="line", restrictOptimizationToROIs=True, restrictOutputToROIs=False))
-        self._fitMenu.addAction("Polynomial", lambda: self.curveFit(fitType="polynomial", restrictOptimizationToROIs=True, restrictOutputToROIs=False))
-        self._fitMenu.addAction("Spline", lambda: self.curveFit(fitType="spline", restrictOptimizationToROIs=True, restrictOutputToROIs=False))
-        self._fitMenu.addAction("Custom", lambda: self.curveFit(fitType="custom", restrictOptimizationToROIs=True, restrictOutputToROIs=False))
+        self._fitMenu.addAction("Mean", lambda: self.curveFit(fitType="mean"))
+        self._fitMenu.addAction("Line", lambda: self.curveFit(fitType="line"))
+        self._fitMenu.addAction("Polynomial", lambda: self.curveFit(fitType="polynomial"))
+        self._fitMenu.addAction("Spline", lambda: self.curveFit(fitType="spline"))
+        self._fitMenu.addAction("Custom", lambda: self.curveFit(fitType="custom"))
 
         # Context menu (added on to default context menu)
         self._customMenuBeginningSeparatorAction = self.menu.addSeparator()
@@ -138,6 +151,12 @@ class CustomViewBox(pg.ViewBox):
         roi = pg.LinearRegionItem(values=limits, orientation=orientation)
         self.addItem(roi)
         self.ROIs.append(roi)
+    
+    def xRegionROIs(self):
+        return [roi for roi in self.ROIs if roi.orientation == "vertical"]
+    
+    def yRegionROIs(self):
+        return [roi for roi in self.ROIs if roi.orientation == "horizontal"]
     
     def removeLastROI(self):
         if self.ROIs:
@@ -198,11 +217,12 @@ class CustomViewBox(pg.ViewBox):
             y = self.tsa._seriesAttr(seriesIndex, 'y')
             
             # optimize fit based on (fx, fy)
-            if restrictOptimizationToROIs and len(self.ROIs):
+            xrois = self.xRegionROIs()
+            if restrictOptimizationToROIs and len(xrois):
                 inROIs = np.zeros(len(x), dtype=bool)
-                for roi in self.ROIs:
-                    roiXMin, roiXMax = roi.getRegion()
-                    inROIs = inROIs | ((x >= roiXMin) & (x <= roiXMax))
+                for xroi in xrois:
+                    xmin, xmax = xroi.getRegion()
+                    inROIs = inROIs | ((x >= xmin) & (x <= xmax))
                 fx, fy = x[inROIs], y[inROIs]
             else:
                 fx, fy = x, y
@@ -230,6 +250,7 @@ class CustomViewBox(pg.ViewBox):
                 tck = sp.interpolate.splrep(fx, fy, s=fitParams['smoothing'])
                 yfit = sp.interpolate.splev(xfit, tck, der=0)
             elif fitType == "custom":
+                # TODO: implement custom fit
                 pass
 
             # fit series data
@@ -241,57 +262,128 @@ class CustomViewBox(pg.ViewBox):
             # add fit to plot
             fitItem = CustomPlotDataItem(x=xfit, y=yfit, pen=pg.mkPen(color=(255, 0, 0), width=3))
             self.plotWidget.addItem(fitItem)
-        
-        # keep fits?
-        if not fits:
-            return
-        keepFits = QMessageBox.question(self.parentWidget().parentWidget(), "Keep Fits?", "Keep fits?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if keepFits == QMessageBox.No:
-            self.tsa.updateUI()
-            return
 
-        # name fits
-        fitName, ok = QInputDialog.getText(self.parentWidget().parentWidget(), "Fit Name", "Fit name:", text=fitType)
-        if not ok:
-            self.tsa.updateUI()
-            return
-        fitName = fitName.strip()
-        for i in range(len(fits)):
-            fits[i]['name'] = fitName
+        self.addSeries(fits, "Fit", fitType)
+        self.tsa.updateUI()
+    
+    def measure(self, curveDataItems=None, measurementType="mean"):
+        measurements = []
+        if curveDataItems is None:
+            curveDataItems = self.listDataItems()
+        elif not isinstance(curveDataItems, list):
+            curveDataItems = [curveDataItems]
+        for dataItem in curveDataItems:
+            seriesIndex = dataItem.seriesIndex
+            data = self.tsa.data[seriesIndex]
+            x = self.tsa._seriesAttr(seriesIndex, 'x')
+            y = self.tsa._seriesAttr(seriesIndex, 'y')
+
+            # measurement within each ROI (or whole curve if no ROIs)
+            xrois = self.xRegionROIs()
+            xranges = [xroi.getRegion() for xroi in xrois]
+            if not xranges:
+                xranges = [(x[0], x[-1])]
+            
+            xmeasure = []
+            ymeasure = []
+            for xrange in xranges:
+                xmin, xmax = xrange
+                xmask = (x >= xmin) & (x <= xmax)
+                xroi = x[xmask]
+                yroi = y[xmask]
+                nroi = len(xroi)
+                if measurementType == "mean":
+                    xm = xroi[int(nroi / 2)]
+                    ym = np.mean(yroi)
+                elif measurementType == "median":
+                    xm = xroi[int(nroi / 2)]
+                    ym = np.median(yroi)
+                elif measurementType == "min":
+                    i = np.argmin(yroi)
+                    xm = xroi[i]
+                    ym = yroi[i]
+                elif measurementType == "max":
+                    i = np.argmax(yroi)
+                    xm = xroi[i]
+                    ym = yroi[i]
+                elif measurementType == "absmax":
+                    i = np.argmax(np.abs(yroi))
+                    xm = xroi[i]
+                    ym = yroi[i]
+                xmeasure.append(xm)
+                ymeasure.append(ym)
+            if not ymeasure:
+                continue
+            else:
+                xmeasure = np.array(xmeasure)
+                ymeasure = np.array(ymeasure)
+
+            # measurement series data
+            measurement = {'x': xmeasure, 'y': ymeasure}
+            for key in ['xlabel', 'ylabel', 'episode', 'group']:
+                measurement[key] = self.tsa._seriesAttr(seriesIndex, key)
+            measurement['style'] = {'marker': 'o'}
+            measurements.append(measurement)
+
+            # add measure to plot
+            measurementItem = CustomPlotDataItem(x=xmeasure, y=ymeasure, pen=pg.mkPen(color=(255, 0, 0), width=3), 
+                symbol='o', symbolSize=10, symbolPen=pg.mkPen(color=(255, 0, 0), width=3), symbolBrush=(255, 0, 0, 0))
+            self.plotWidget.addItem(measurementItem)
+
+        self.addSeries(measurements, "Measurement", measurementType)
+        self.tsa.updateUI()
+    
+    def addSeries(self, data, label="series", defaultName="", askToKeep=True, rename=True, checkForOverwrite=True):
+        if not data:
+            return False
         
-        # overwrite existing (episode,group,name) series?
-        fitNameAlreadyExists = False
-        for fit in fits:
-            seriesIndexes = self.tsa._seriesIndexes(episodes=[fit['episode']], groups=[fit['group']])
-            names = self.tsa.names(seriesIndexes)
-            if fit['name'] in names:
-                fitNameAlreadyExists = True
-                break
-        if fitNameAlreadyExists:
-            overwrite = QMessageBox.question(self.parentWidget().parentWidget(), "Overwrite?", "Overwrite existing series with same name?", QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Cancel)
-            if overwrite == QMessageBox.Cancel:
-                self.tsa.updateUI()
-                return
+        if askToKeep:
+            keep = QMessageBox.question(self.parentWidget().parentWidget(), f"Keep {label}?", f"Keep {label}?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if keep == QMessageBox.No:
+                return False
+
+        if rename:
+            name, ok = QInputDialog.getText(self.parentWidget().parentWidget(), f"{label} name", f"{label} name:", text=defaultName)
+            if not ok:
+                return False
+            name = name.strip()
+            for i in range(len(data)):
+                data[i]['name'] = name
+        
+        overwrite = False
+        if checkForOverwrite:
+            nameAlreadyExists = False
+            for series in data:
+                seriesIndexes = self.tsa._seriesIndexes(episodes=[series['episode']], groups=[series['group']])
+                names = self.tsa.names(seriesIndexes)
+                if series['name'] in names:
+                    nameAlreadyExists = True
+                    break
+            if nameAlreadyExists:
+                overwrite = QMessageBox.question(self.parentWidget().parentWidget(), "Overwrite?", "Overwrite existing series with same name?", QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Cancel)
+                if overwrite == QMessageBox.Cancel:
+                    return False
+                overwrite = True if overwrite == QMessageBox.Yes else False
+        
+        # store data
+        if overwrite:
+            for series in data:
+                seriesIndexes = self.tsa._seriesIndexes(episodes=[series['episode']], groups=[series['group']], names=[series['name']])
+                if seriesIndexes:
+                    self.tsa.data[seriesIndexes[-1]] = series
+                else:
+                    self.tsa.data.append(series)
         else:
-            overwrite = QMessageBox.No
+            self.tsa.data.extend(data)
         
-        # store fits
-        if overwrite == QMessageBox.Yes:
-            for fit in fits:
-                seriesIndexes = self.tsa._seriesIndexes(episodes=[fit['episode']], groups=[fit['group']], names=[fit['name']])
-                self.tsa.data[seriesIndexes[-1]] = fit
-        elif overwrite == QMessageBox.No:
-            self.tsa.data.extend(fits)
-        
-        # make sure fits are visible
+        # make sure new data is visible
         visibleNames = self.tsa.visibleNames()
-        for fit in fits:
-            if fit['name'] not in visibleNames:
-                visibleNames.append(fit['name'])
+        for series in data:
+            if series['name'] not in visibleNames:
+                visibleNames.append(series['name'])
         self.tsa.setVisibleNames(visibleNames)
 
-        # update UI
-        self.tsa.updateUI()
+        return True
 
 
 class CustomPlotDataItem(pg.PlotDataItem):
@@ -384,6 +476,8 @@ class QtTimeSeriesAnalyzer(QWidget):
             [76.7550, 189.9750, 237.9150],
             [161.9250, 19.8900, 46.9200]
         ]
+        self.styles['markers'] = {}
+        self.styles['markers']['size'] = 10
 
         # widget background color
         # pal = self.palette()
@@ -507,6 +601,8 @@ class QtTimeSeriesAnalyzer(QWidget):
                 value = 'data'
             elif attr in ['episode', 'group']:
                 value = 0
+            if attr == 'style':
+                value = {}
         elif attr == 'x':
             if isinstance(value, float) or isinstance(value, int):
                 if 'y' in series:
@@ -750,25 +846,67 @@ class QtTimeSeriesAnalyzer(QWidget):
             # get data for this group
             dataItems = plot.listCustomDataItems()
             colormap = self.styles['lines']['colormap']
+            colorIndex = 0
             seriesIndexes = self._seriesIndexes(groups=[group], episodes=visibleEpisodes, names=visibleNames)
             for j, index in enumerate(seriesIndexes):
                 # data to plot
                 series = self.data[index]
                 x = self._seriesAttr(index, 'x')
                 y = self._seriesAttr(index, 'y')
-                color = colormap[j % len(colormap)]
-                lineWidth = self.styles['lines']['width']
-                linePen = pg.mkPen(color, width=lineWidth)
+                style = self._seriesAttr(index, 'style')
+
+                if 'color' in style:
+                    color = style['color']
+                else:
+                    color = colormap[colorIndex % len(colormap)]
+                    colorIndex += 1
+                
+                lineWidth = None
+                for key in ['linewidth', 'lw', 'width']:
+                    if key in style:
+                        lineWidth = style[key]
+                        break
+                if lineWidth is None:
+                    lineWidth = self.styles['lines']['width']
+
+                linePen = pg.mkPen(color=color, width=lineWidth)
+
+                symbol = None
+                for key in ['marker', 'symbol']:
+                    if key in style:
+                        symbol = style[key]
+                        break
+
+                if symbol is not None:
+                    symbolSize = None
+                    for key in ['markersize', 'symbolsize', 'size']:
+                        if key in style:
+                            symbolSize = style[key]
+                            break
+                    if symbolSize is None:
+                        symbolSize = self.styles['markers']['size']
+                    
+                    symbolPen = linePen
+                    symbolBrush = (*color[:3], 0)
                 
                 if len(dataItems) > j:
                     # update existing plot data
                     dataItems[j].setData(x, y)
                     dataItems[j].setPen(linePen)
+                    dataItems[j].setSymbol(symbol)
+                    if symbol is not None:
+                        dataItems[j].setSymbolSize(symbolSize)
+                        dataItems[j].setSymbolPen(symbolPen)
+                        dataItems[j].setSymbolBrush(symbolBrush)
                     dataItems[j].seriesIndex = index
                 else:
                     # add new plot data
                     # dataItem = plot.plot(x, y, pen=linePen)
-                    dataItem = CustomPlotDataItem(x, y, pen=linePen)
+                    if symbol is None:
+                        dataItem = CustomPlotDataItem(x, y, pen=linePen)
+                    else:
+                        dataItem = CustomPlotDataItem(x, y, pen=linePen, 
+                            symbol=symbol, symbolSize=symbolSize, symbolPen=symbolPen, symbolBrush=symbolBrush)
                     dataItem.seriesIndex = index
                     plot.addItem(dataItem)
                 
@@ -871,7 +1009,7 @@ class DataTableModel(QAbstractTableModel):
         QAbstractTableModel.__init__(self)
         self._tsa = tsa
         self._data = tsa.data
-        self._requiredColumns = ['episode', 'group', 'name', 'x', 'y', 'xlabel', 'ylabel']
+        self._requiredColumns = ['episode', 'group', 'name', 'x', 'y', 'xlabel', 'ylabel', 'style']
         self._columns = []
         self._updateColumns()
 
@@ -961,7 +1099,7 @@ class DataTableModel(QAbstractTableModel):
                         value = None
                         if attr == 'y':
                             return False
-                    elif len(values) == 1:
+                    elif attr == 'x' and len(values) == 1:
                         value = values[0]
                     else:
                         value = np.array(values)
@@ -969,6 +1107,14 @@ class DataTableModel(QAbstractTableModel):
                     return False
                 applyChange = QMessageBox.question(self._tsa, 'Confirm', 'Are you sure you want to change the series data?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
                 if applyChange == QMessageBox.No:
+                    return False
+            elif attr == 'style':
+                # should be a dictionary
+                try:
+                    value = ast.literal_eval(value)
+                except:
+                    return False
+                if not isinstance(value, dict):
                     return False
             if value == '' and attr not in self._data[seriesIndex]:
                 return False
@@ -1014,8 +1160,8 @@ if __name__ == '__main__':
 
     # testing
     for i in range(10):
-        widget.addSeries(y=np.random.random(10000), xlabel="Time, s", ylabel="Current, pA", group="I", episode=2*i, test=None)
-        widget.addSeries(y=np.random.random(10000), xlabel="Time, s", ylabel="Voltage, mV", group="V", episode=2*i)
+        widget.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Current, pA", group="I", episode=i)
+        widget.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Voltage, mV", group="V", episode=i)
 
     # Show widget and run application
     widget.show()
