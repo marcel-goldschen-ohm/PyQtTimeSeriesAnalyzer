@@ -7,7 +7,6 @@ TODO:
 - edit plot styles
 - zero, interpolate, mask
 - series math
-- ROI measurements
 - add attr via table view
 - hidden series (or just episodes)?
 - series tags
@@ -35,6 +34,17 @@ import ast
 import numpy as np
 import scipy as sp
 import pyqtgraph as pg
+
+# try:
+#     from pyqtconsole.console import PythonConsole
+# except ImportError:
+#     PythonConsole = None
+
+try:
+    # https://github.com/campagnola/heka_reader
+    import heka_reader
+except ImportError:
+    heka_reader = None
 
 
 pg.setConfigOption('foreground', 'k')   # Default foreground color for text, lines, axes, etc.
@@ -183,6 +193,11 @@ class CustomViewBox(pg.ViewBox):
     
     def curveFit(self, curveDataItems=None, fitType="mean", fitParams=None, 
                 restrictOptimizationToROIs=True, outputXValues=None, restrictOutputToROIs=False):
+        # curve data items
+        if curveDataItems is None:
+            curveDataItems = self.listDataItems()
+        elif not isinstance(curveDataItems, list):
+            curveDataItems = [curveDataItems]
         # fit parameters
         if fitParams is None:
             fitParams = {}
@@ -193,23 +208,19 @@ class CustomViewBox(pg.ViewBox):
                 if not ok:
                     return
         elif fitType == "spline":
-            if 'smoothing' not in fitParams:
-                try:
-                    x, y = self.listDataItems()[0].getData()
-                    s = len(x)
-                except:
-                    s = 100
-                fitParams['smoothing'], ok = QInputDialog.getInt(
-                    self.parentWidget().parentWidget(), "Spline Fit", "Smoothing 0-inf (# samples often works well):", s, 0, int(1e9), 1)
+            if 'num_segments' not in fitParams:
+                fitParams['num_segments'], ok = QInputDialog.getInt(
+                    self.parentWidget().parentWidget(), "Spline Fit", "# Segments:", 10, 1, int(1e9), 1)
                 if not ok:
                     return
+            # if 'smoothing' not in fitParams:
+            #     fitParams['smoothing'], ok = QInputDialog.getDouble(
+            #         self.parentWidget().parentWidget(), "Spline Fit", "Smoothing (0-inf):", 0, 0, float(1e9), 9)
+            #     if not ok:
+            #         return
 
         # fit each data item
         fits = []
-        if curveDataItems is None:
-            curveDataItems = self.listDataItems()
-        elif not isinstance(curveDataItems, list):
-            curveDataItems = [curveDataItems]
         for dataItem in curveDataItems:
             seriesIndex = dataItem.seriesIndex
             data = self.tsa.data[seriesIndex]
@@ -217,7 +228,7 @@ class CustomViewBox(pg.ViewBox):
             y = self.tsa._seriesAttr(seriesIndex, 'y')
             
             # optimize fit based on (fx, fy)
-            xrois = self.xRegionROIs()
+            xrois = [roi for roi in self.xRegionROIs() if roi.isVisible()]
             if restrictOptimizationToROIs and len(xrois):
                 inROIs = np.zeros(len(x), dtype=bool)
                 for xroi in xrois:
@@ -247,7 +258,11 @@ class CustomViewBox(pg.ViewBox):
                 p = np.polyfit(fx, fy, fitParams['degree'])
                 yfit = np.polyval(p, xfit)
             elif fitType == "spline":
-                tck = sp.interpolate.splrep(fx, fy, s=fitParams['smoothing'])
+                segment_length = max(1, int(len(fy) / fitParams['num_segments']))
+                knots = fx[segment_length:-segment_length:segment_length]
+                if len(knots) < 2:
+                    knots = fx[[1, -2]]
+                tck = sp.interpolate.splrep(fx, fy, t=knots)
                 yfit = sp.interpolate.splev(xfit, tck, der=0)
             elif fitType == "custom":
                 # TODO: implement custom fit
@@ -279,7 +294,7 @@ class CustomViewBox(pg.ViewBox):
             y = self.tsa._seriesAttr(seriesIndex, 'y')
 
             # measurement within each ROI (or whole curve if no ROIs)
-            xrois = self.xRegionROIs()
+            xrois = [roi for roi in self.xRegionROIs() if roi.isVisible()]
             xranges = [xroi.getRegion() for xroi in xrois]
             if not xranges:
                 xranges = [(x[0], x[-1])]
@@ -429,6 +444,8 @@ class CustomPlotDataItem(pg.PlotDataItem):
                 name = f"Series {self.seriesIndex}"
             self._contextMenu = QMenu(name)
 
+            self._contextMenu.addAction("Edit Style", self.styleDialog)
+
             # self._baselineMenu = QMenu("Baseline")
             # self._baselineMenu.addAction("Mean", lambda: viewBox.curveFit(self, fitType="mean", fitBaseline=True))
             # self._baselineMenu.addAction("Line", lambda: viewBox.curveFit(self, fitType="line", fitBaseline=True))
@@ -443,6 +460,13 @@ class CustomPlotDataItem(pg.PlotDataItem):
             self.menu.addSeparator()
 
         return self.menu
+    
+    def styleDialog(self):
+        viewBox = self.parentWidget()
+        tsa = viewBox.tsa
+        style = tsa._seriesAttr(self.seriesIndex, 'style')
+        tsa.styleDialog(style)
+        tsa.data[self.seriesIndex]['style'] = style
 
 
 class QtTimeSeriesAnalyzer(QWidget):
@@ -455,7 +479,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         # plot styles
         self.styles = {}
         self.styles['figure'] = {}
-        self.styles['figure']['background-color'] = None
+        self.styles['figure']['background-color'] = None  # None ==> use system default
         self.styles['axes'] = {}
         self.styles['axes']['background-color'] = [220, 220, 220]
         self.styles['axes']['foreground-color'] = [128, 128, 128]
@@ -479,10 +503,18 @@ class QtTimeSeriesAnalyzer(QWidget):
         self.styles['markers'] = {}
         self.styles['markers']['size'] = 10
 
+        # # Python interactive console
+        # if PythonConsole is not None:
+        #     self._console = PythonConsole()
+        #     self._console.eval_queued()
+        # else:
+        #     self._console = None
+
         # widget background color
-        # pal = self.palette()
-        # pal.setColor(pal.Window, QColor(*self.styles['figure']['background-color']))
-        # self.setPalette(pal)
+        if self.styles['figure']['background-color'] is not None:
+            pal = self.palette()
+            pal.setColor(pal.Window, QColor(*self.styles['figure']['background-color']))
+            self.setPalette(pal)
 
         # visible group selection
         self._visibleGroupsListWidget = QListWidget()
@@ -550,8 +582,6 @@ class QtTimeSeriesAnalyzer(QWidget):
         # self._applyScaleButton.setText("S")
         # self._applyScaleButton.setToolTip("Apply scale")
 
-        # tags
-
         # layout
         self._mainGridLayout = QGridLayout(self)
         self._mainGridLayout.setContentsMargins(3, 3, 3, 3)
@@ -586,6 +616,57 @@ class QtTimeSeriesAnalyzer(QWidget):
         self.data.extend(listOfSeriesDicts)
         self.updateUI()
     
+    def importHEKA(self, filename: str):
+        """
+        Import HEKA data file.
+
+        HEKA format: Group (Experiment) -> Series (Recording) -> Sweep (Episode) -> Trace (Data Series)
+        """
+        if heka_reader is None:
+            return
+        bundle = heka_reader.Bundle(filename)
+        numHekaGroups = len(bundle.pul)
+        if numHekaGroups == 0:
+            return
+        elif numHekaGroups == 1:
+            hekaGroupIndex = 0
+        elif numHekaGroups > 1:
+            # choose a group (experiment) to load
+            hekaGroupNames = [bundle.pul[i].Label for i in range(numHekaGroups)]
+            hekaGroupNamesListWidget = QListWidget()
+            hekaGroupNamesListWidget.addItems(hekaGroupNames)
+            hekaGroupNamesListWidget.setSelectionMode(QAbstractItemView.SingleSelection)
+            hekaGroupNamesListWidget.setSelected(hekaGroupNamesListWidget.item(0), True)
+            dlg = QDialog()
+            dlg.setWindowTitle("Choose Recording")
+            buttonBox = QDialogButtonBox()
+            buttonBox.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+            buttonBox.accepted.connect(dlg.accept)
+            buttonBox.rejected.connect(dlg.reject)
+            dlg.setWindowModality(Qt.ApplicationModal)
+            if dlg.exec_():
+                hekaGroupIndex = hekaGroupNamesListWidget.selectedIndexes()[0].row()
+            else:
+                return
+        data = []
+        numHekaSeries = len(bundle.pul[hekaGroupIndex])
+        for hekaSeriesIndex in range(numHekaSeries):
+            numHekaSweeps = len(bundle.pul[hekaGroupIndex][hekaSeriesIndex])
+            for hekaSweepIndex in range(numHekaSweeps):
+                episode = hekaSweepIndex
+                numHekaTraces = len(bundle.pul[hekaGroupIndex][hekaSeriesIndex][hekaSweepIndex])
+                for hekaTraceIndex in range(numHekaTraces):
+                    group = hekaTraceIndex
+                    trace = bundle.pul[hekaGroupIndex][hekaSeriesIndex][hekaSweepIndex][hekaTraceIndex]
+                    x = trace.XInterval + trace.XStart
+                    y = bundle.data[(hekaGroupIndex, hekaSeriesIndex, hekaSweepIndex, hekaTraceIndex)] + trace.YOffset
+                    xlabel = 'Time, ' + trace.XUnit
+                    ylabel = trace.Label + ', ' + trace.YUnit
+                    data.append({'x': x, 'y': y, 'xlabel': xlabel, 'ylabel': ylabel, 'episode': episode, 'group': group})
+        if data:
+            self.addListOfSeries(data)
+            self.updateUI()
+    
     def _seriesAttr(self, seriesIndex: int, attr):
         series = self.data[seriesIndex]
         value = series[attr] if attr in series else None
@@ -601,7 +682,7 @@ class QtTimeSeriesAnalyzer(QWidget):
                 value = 'data'
             elif attr in ['episode', 'group']:
                 value = 0
-            if attr == 'style':
+            elif attr == 'style':
                 value = {}
         elif attr == 'x':
             if isinstance(value, float) or isinstance(value, int):
@@ -619,6 +700,59 @@ class QtTimeSeriesAnalyzer(QWidget):
         if seriesIndexes is None:
             seriesIndexes = range(len(self.data))
         return [self._seriesAttr(i, attr) for i in seriesIndexes if 0 <= i < len(self.data)]
+    
+    def _styleAttr(self, style: dict, attr):
+        attr = attr.lower()
+        value = style[attr] if attr in style else None
+        if value is not None:
+            return value
+        attrGroups = [
+            ['color', 'c'],
+            ['linestyle', 'ls'],
+            ['linewidth', 'lw'],
+            ['marker'],
+            ['markersize', 'ms', 'size'],
+            ['markeredgewidth', 'mew'],
+            ['markeredgecolor', 'mec'],
+            ['markerfacecolor', 'mfc']
+        ]
+        for attrGroup in attrGroups:
+            if attr in attrGroup:
+                for key in attrGroup:
+                    if key in style:
+                        return style[key]
+                return None
+        return None
+    
+    def _setStyleAttr(self, style: dict, attr, value):
+        attr = attr.lower()
+        if attr in style:
+            if value is None:
+                del style[attr]
+            else:
+                style[attr] = value
+            return
+        attrGroups = [
+            ['color', 'c'],
+            ['linestyle', 'ls'],
+            ['linewidth', 'lw'],
+            ['marker'],
+            ['markersize', 'ms', 'size'],
+            ['markeredgewidth', 'mew'],
+            ['markeredgecolor', 'mec'],
+            ['markerfacecolor', 'mfc']
+        ]
+        for attrGroup in attrGroups:
+            if attr in attrGroup:
+                for key in attrGroup:
+                    if key in style:
+                        if value is None:
+                            del style[key]
+                        else:
+                            style[key] = value
+                        return
+        if value is not None:
+            style[attr] = value
     
     def _seriesIndexes(self, episodes=None, groups=None, names=None) -> list:
         indexes = []
@@ -855,39 +989,45 @@ class QtTimeSeriesAnalyzer(QWidget):
                 y = self._seriesAttr(index, 'y')
                 style = self._seriesAttr(index, 'style')
 
-                if 'color' in style:
-                    color = style['color']
-                else:
+                color = self._styleAttr(style, 'color')
+                if color is None:
                     color = colormap[colorIndex % len(colormap)]
                     colorIndex += 1
-                
-                lineWidth = None
-                for key in ['linewidth', 'lw', 'width']:
-                    if key in style:
-                        lineWidth = style[key]
-                        break
+
+                lineStyle = self._styleAttr(style, 'linestyle')
+                lineStyles = {
+                    '-': Qt.SolidLine, '--': Qt.DashLine, ':': Qt.DotLine, '-.': Qt.DashDotLine, 
+                    'none': None, '': Qt.SolidLine, None: Qt.SolidLine
+                }
+                lineStyle = lineStyles[lineStyle]
+
+                lineWidth = self._styleAttr(style, 'linewidth')
                 if lineWidth is None:
                     lineWidth = self.styles['lines']['width']
+                
+                if lineStyle is None:
+                    linePen = None
+                else:
+                    linePen = pg.mkPen(color=color, width=lineWidth, style=lineStyle)
 
-                linePen = pg.mkPen(color=color, width=lineWidth)
-
-                symbol = None
-                for key in ['marker', 'symbol']:
-                    if key in style:
-                        symbol = style[key]
-                        break
-
+                symbol = self._styleAttr(style, 'marker')
                 if symbol is not None:
-                    symbolSize = None
-                    for key in ['markersize', 'symbolsize', 'size']:
-                        if key in style:
-                            symbolSize = style[key]
-                            break
+                    symbolSize = self._styleAttr(style, 'markersize')
                     if symbolSize is None:
                         symbolSize = self.styles['markers']['size']
+
+                    symbolEdgeWidth = self._styleAttr(style, 'markeredgewidth')
+                    if symbolEdgeWidth is None:
+                        symbolEdgeWidth = lineWidth
                     
-                    symbolPen = linePen
-                    symbolBrush = (*color[:3], 0)
+                    symbolEdgeColor = self._styleAttr(style, 'markeredgecolor')
+                    if symbolEdgeColor is None:
+                        symbolEdgeColor = color
+
+                    symbolFaceColor = self._styleAttr(style, 'markerfacecolor')
+                    
+                    symbolPen = pg.mkPen(color=symbolEdgeColor, width=symbolEdgeWidth)
+                    # symbolBrush = (*color[:3], 0)
                 
                 if len(dataItems) > j:
                     # update existing plot data
@@ -897,7 +1037,7 @@ class QtTimeSeriesAnalyzer(QWidget):
                     if symbol is not None:
                         dataItems[j].setSymbolSize(symbolSize)
                         dataItems[j].setSymbolPen(symbolPen)
-                        dataItems[j].setSymbolBrush(symbolBrush)
+                        dataItems[j].setSymbolBrush(symbolFaceColor)
                     dataItems[j].seriesIndex = index
                 else:
                     # add new plot data
@@ -906,7 +1046,7 @@ class QtTimeSeriesAnalyzer(QWidget):
                         dataItem = CustomPlotDataItem(x, y, pen=linePen)
                     else:
                         dataItem = CustomPlotDataItem(x, y, pen=linePen, 
-                            symbol=symbol, symbolSize=symbolSize, symbolPen=symbolPen, symbolBrush=symbolBrush)
+                            symbol=symbol, symbolSize=symbolSize, symbolPen=symbolPen, symbolBrush=symbolFaceColor)
                     dataItem.seriesIndex = index
                     plot.addItem(dataItem)
                 
@@ -1002,6 +1142,27 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._tableView.setModel(self._tableModel)
         self._tableView.show()
         self._tableView.resizeColumnsToContents()
+    
+    def styleDialog(self, style: dict):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Style")
+        form = QFormLayout(dlg)
+        widgets = {}
+        for key in ['linestyle', 'linewidth', 'color', 'marker', 'markersize', 'markeredgewidth', 'markeredgecolor', 'markerfacecolor']:
+            value = self._styleAttr(style, key)
+            widgets[key] = QLineEdit(str(value))
+            form.addRow(key, widgets[key])
+        buttonBox = QDialogButtonBox()
+        buttonBox.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        buttonBox.accepted.connect(dlg.accept)
+        buttonBox.rejected.connect(dlg.reject)
+        dlg.setWindowModality(Qt.ApplicationModal)
+        if dlg.exec_():
+            for key in widgets:
+                value = widgets[key].text().strip()
+                if value == '':
+                    value = None
+                self._setStyleAttr(style, key, value)
 
 
 class DataTableModel(QAbstractTableModel):
@@ -1148,22 +1309,34 @@ class DataTableModel(QAbstractTableModel):
                     self._columns.append(attr)
 
 
+def runAppFromReplWithoutBlocking():
+    # Create the application
+    app = QApplication(sys.argv)
+    app.setStyle('Fusion')
+
+    # Create, show and return widget
+    tsa = QtTimeSeriesAnalyzer()
+    tsa.show()
+    tsa.raise_()  # bring window to front
+    
+    return app, tsa
+
+
 if __name__ == '__main__':
     # Create the application
     app = QApplication(sys.argv)
-
-    # style theme
     app.setStyle('Fusion')
 
     # Create widget
-    widget = QtTimeSeriesAnalyzer()
+    tsa = QtTimeSeriesAnalyzer()
 
     # testing
-    for i in range(10):
-        widget.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Current, pA", group="I", episode=i)
-        widget.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Voltage, mV", group="V", episode=i)
+    tsa.importHEKA('heka.dat')
+    # for i in range(10):
+    #     tsa.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Current, pA", group="I", episode=i)
+    #     tsa.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Voltage, mV", group="V", episode=i)
 
     # Show widget and run application
-    widget.show()
-    exitStatus = app.exec()
-    sys.exit(exitStatus)
+    tsa.show()
+    # tsa._console.show()
+    sys.exit(app.exec())
