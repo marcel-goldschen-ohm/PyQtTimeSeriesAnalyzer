@@ -4,13 +4,10 @@ PyQtTimeSeriesAnalyzer.py
 Very much still a work in progress.
 
 TODO:
-- edit plot styles
 - zero, interpolate, mask
-- series math
 - add attr via table view
 - hidden series (or just episodes)?
 - series tags
-- load/save data in Matlab format
 - data item context menu
 - requirements.txt
 - detailed instructions in the associated README.md file
@@ -28,17 +25,15 @@ try:
 except ImportError:
     raise ImportError("Requires PyQt5")
 
-import sys
-import re
-import ast
+import sys, os, re, ast, copy
 import numpy as np
 import scipy as sp
 import pyqtgraph as pg
 
-# try:
-#     from pyqtconsole.console import PythonConsole
-# except ImportError:
-#     PythonConsole = None
+try:
+    from pyqtconsole.console import PythonConsole
+except ImportError:
+    PythonConsole = None
 
 try:
     # https://github.com/campagnola/heka_reader
@@ -109,7 +104,10 @@ class CustomViewBox(pg.ViewBox):
         self.tsa = tsa
 
         # Regions of Interest (ROIs)
-        self.ROIs = []
+        self._drawROIs = False
+        self._drawROIsOrientation = "vertical"
+        self._drawingROI = None
+        self._drawingROIStartPos = None
 
         # Measurement context menu
         self._measureMenu = QMenu("Measure")
@@ -121,15 +119,13 @@ class CustomViewBox(pg.ViewBox):
 
         # ROI context menu
         self._roiMenu = QMenu("ROI")
-        self._roiMenu.addAction("Add X axis ROI", lambda: self.addROI(orientation="vertical"))
-        self._roiMenu.addAction("Add Y axis ROI", lambda: self.addROI(orientation="horizontal"))
+        self._roiMenu.addAction("Draw X axis ROIs", lambda: self.startDrawingROIs(orientation="vertical"))
         self._roiMenu.addSeparator()
         self._roiMenu.addMenu(self._measureMenu)
         self._roiMenu.addSeparator()
         self._roiMenu.addAction("Show ROIs", self.showROIs)
         self._roiMenu.addAction("Hide ROIs", self.hideROIs)
         self._roiMenu.addSeparator()
-        self._roiMenu.addAction("Remove Last ROI", self.removeLastROI)
         self._roiMenu.addAction("Clear ROIs", self.clearROIs)
 
         # Curve fit context menu
@@ -141,61 +137,97 @@ class CustomViewBox(pg.ViewBox):
         self._fitMenu.addAction("Custom", lambda: self.curveFit(fitType="custom"))
 
         # Context menu (added on to default context menu)
-        self._customMenuBeginningSeparatorAction = self.menu.addSeparator()
+        self.menu.addSeparator()
         self.menu.addMenu(self._roiMenu)
         self.menu.addMenu(self._fitMenu)
-        self._customMenuEndingSeparatorAction = self.menu.addSeparator()
+        self.menu.addAction("Trace Math", self.traceMathDialog)
+        self.menu.addSeparator()
     
-    def addROI(self, orientation="vertical", limits=None):
-        if limits is None:
-            # place ROI in the middle of the view range
-            if orientation == "vertical":
-                # X axis range
-                min_, max_ = self.state['viewRange'][0]
-            elif orientation == "horizontal":
-                # Y axis range
-                min_, max_ = self.state['viewRange'][1]
-            range_ = max_ - min_
-            mid = (min_ + max_) / 2
-            limits = (mid - 0.05 * range_, mid + 0.05 * range_)
-        roi = pg.LinearRegionItem(values=limits, orientation=orientation)
-        self.addItem(roi)
-        self.ROIs.append(roi)
+    def group(self):
+        groups = self.tsa.groups()
+        plots = self.tsa._groupPlots()
+        for i, plot in enumerate(plots):
+            if plot.getViewBox() == self:
+                return groups[i]
+        return None
     
-    def xRegionROIs(self):
-        return [roi for roi in self.ROIs if roi.orientation == "vertical"]
+    def getROIs(self):
+        return [item for item in self.allChildren() if isinstance(item, CustomLinearRegionItem)]
     
-    def yRegionROIs(self):
-        return [roi for roi in self.ROIs if roi.orientation == "horizontal"]
+    def getXAxisROIs(self):
+        return [item for item in self.allChildren() if isinstance(item, CustomLinearRegionItem) and item.orientation == "vertical"]
     
-    def removeLastROI(self):
-        if self.ROIs:
-            roi = self.ROIs.pop()
-            self.removeItem(roi)
-            roi.deleteLater()
+    def getYAxisROIs(self):
+        return [item for item in self.allChildren() if isinstance(item, CustomLinearRegionItem) and item.orientation == "horizontal"]
+    
+    def startDrawingROIs(self, orientation="vertical"):
+        self._drawROIsOrientation = orientation
+        self._drawROIs = True
+
+    def stopDrawingROIs(self):
+        self._drawROIs = False
+    
+    def mousePressEvent(self, event):
+        if self._drawROIs:
+            if event.button() == Qt.LeftButton:
+                posInAxes = self.mapSceneToView(self.mapToScene(event.pos()))
+                if self._drawROIsOrientation == "vertical":
+                    posAlongAxis = posInAxes.x()
+                elif self._drawROIsOrientation == "horizontal":
+                    posAlongAxis = posInAxes.y()
+                self._drawingROIStartPos = posAlongAxis
+                event.accept()
+                return
+            self._drawROIs = False
+        pg.ViewBox.mousePressEvent(self, event)
+    
+    def mouseReleaseEvent(self, event):
+        if self._drawROIs:
+            if event.button() == Qt.LeftButton:
+                self._drawingROI = None
+                event.accept()
+                return
+        pg.ViewBox.mouseReleaseEvent(self, event)
+    
+    def mouseMoveEvent(self, event):
+        if self._drawROIs:
+            if event.buttons() & Qt.LeftButton:
+                posInAxes = self.mapSceneToView(self.mapToScene(event.pos()))
+                if self._drawROIsOrientation == "vertical":
+                    posAlongAxis = posInAxes.x()
+                elif self._drawROIsOrientation == "horizontal":
+                    posAlongAxis = posInAxes.y()
+                limits = sorted([self._drawingROIStartPos, posAlongAxis])
+                if self._drawingROI is None:
+                    self._drawingROI = CustomLinearRegionItem(orientation=self._drawROIsOrientation, values=limits)
+                    self.addItem(self._drawingROI)
+                else:
+                    self._drawingROI.setRegion(limits)
+                event.accept()
+                return
+        pg.ViewBox.mouseMoveEvent(self, event)
     
     def showROIs(self):
-        for roi in self.ROIs:
+        for roi in self.getROIs():
             roi.show()
     
     def hideROIs(self):
-        for roi in self.ROIs:
+        for roi in self.getROIs():
             roi.hide()
     
     def clearROIs(self):
-        for roi in self.ROIs:
+        for roi in self.getROIs():
             self.removeItem(roi)
             roi.deleteLater()
-        self.ROIs = []
     
-    def listDataItems(self) -> list:
+    def getCurves(self) -> list:
         return [item for item in self.allChildren() if isinstance(item, pg.PlotDataItem)]
     
     def curveFit(self, curveDataItems=None, fitType="mean", fitParams=None, 
                 restrictOptimizationToROIs=True, outputXValues=None, restrictOutputToROIs=False):
         # curve data items
         if curveDataItems is None:
-            curveDataItems = self.listDataItems()
+            curveDataItems = [item for item in self.allChildren() if isinstance(item, pg.PlotDataItem)]
         elif not isinstance(curveDataItems, list):
             curveDataItems = [curveDataItems]
         # fit parameters
@@ -228,7 +260,7 @@ class CustomViewBox(pg.ViewBox):
             y = self.tsa._seriesAttr(seriesIndex, 'y')
             
             # optimize fit based on (fx, fy)
-            xrois = [roi for roi in self.xRegionROIs() if roi.isVisible()]
+            xrois = [roi for roi in self.getXAxisROIs() if roi.isVisible()]
             if restrictOptimizationToROIs and len(xrois):
                 inROIs = np.zeros(len(x), dtype=bool)
                 for xroi in xrois:
@@ -284,7 +316,7 @@ class CustomViewBox(pg.ViewBox):
     def measure(self, curveDataItems=None, measurementType="mean"):
         measurements = []
         if curveDataItems is None:
-            curveDataItems = self.listDataItems()
+            curveDataItems = [item for item in self.allChildren() if isinstance(item, pg.PlotDataItem)]
         elif not isinstance(curveDataItems, list):
             curveDataItems = [curveDataItems]
         for dataItem in curveDataItems:
@@ -294,7 +326,7 @@ class CustomViewBox(pg.ViewBox):
             y = self.tsa._seriesAttr(seriesIndex, 'y')
 
             # measurement within each ROI (or whole curve if no ROIs)
-            xrois = [roi for roi in self.xRegionROIs() if roi.isVisible()]
+            xrois = [roi for roi in self.getXAxisROIs() if roi.isVisible()]
             xranges = [xroi.getRegion() for xroi in xrois]
             if not xranges:
                 xranges = [(x[0], x[-1])]
@@ -392,13 +424,17 @@ class CustomViewBox(pg.ViewBox):
             self.tsa.data.extend(data)
         
         # make sure new data is visible
-        visibleNames = self.tsa.visibleNames()
-        for series in data:
-            if series['name'] not in visibleNames:
-                visibleNames.append(series['name'])
-        self.tsa.setVisibleNames(visibleNames)
+        if self.tsa.numSelectedVisibleNames() > 0:
+            visibleNames = self.tsa.visibleNames()
+            for series in data:
+                if series['name'] not in visibleNames:
+                    visibleNames.append(series['name'])
+            self.tsa.setVisibleNames(visibleNames)
 
         return True
+    
+    def traceMathDialog(self):
+        self.tsa.traceMathDialog(groups=[self.group()])
 
 
 class CustomPlotDataItem(pg.PlotDataItem):
@@ -433,40 +469,91 @@ class CustomPlotDataItem(pg.PlotDataItem):
         return True
     
     def getContextMenus(self, event=None):
-        if self.menu is None:
-            # defer menu creation until needed
-            self.menu = QMenu()
+        # if self.menu is None:
+        # defer menu creation until needed
+        self.menu = QMenu()
 
-            viewBox = self.parentWidget()
-            tsa = viewBox.tsa
-            name = tsa._seriesAttr(self.seriesIndex, 'name')
-            if name is None or name == "":
-                name = f"Series {self.seriesIndex}"
-            self._contextMenu = QMenu(name)
+        viewBox = self.parentWidget()
+        tsa = viewBox.tsa
+        name = tsa._seriesAttr(self.seriesIndex, 'name')
+        if name is None or name == "":
+            name = f"Series {self.seriesIndex}"
+        else:
+            name += f" [{self.seriesIndex}]"
+        self._contextMenu = QMenu(name)
 
-            self._contextMenu.addAction("Edit Style", self.styleDialog)
+        self._contextMenu.addAction("Rename", self.nameDialog)
+        self._contextMenu.addAction("Edit Style", self.styleDialog)
+        self._contextMenu.addSeparator()
+        self._contextMenu.addAction("Delete Series", self.removeSeries)
 
-            # self._baselineMenu = QMenu("Baseline")
-            # self._baselineMenu.addAction("Mean", lambda: viewBox.curveFit(self, fitType="mean", fitBaseline=True))
-            # self._baselineMenu.addAction("Line", lambda: viewBox.curveFit(self, fitType="line", fitBaseline=True))
-            # self._baselineMenu.addAction("Polynomial", lambda: viewBox.curveFit(self, fitType="polynomial", fitBaseline=True))
-            # self._baselineMenu.addAction("Spline", lambda: viewBox.curveFit(self, fitType="spline", fitBaseline=True))
-            # self._baselineMenu.addAction("Custom", lambda: viewBox.curveFit(self, fitType="custom", fitBaseline=True))
-            # self._baselineMenu.addSeparator()
-            # self._baselineMenu.addAction("Clear")
-            # self._contextMenu.addMenu(self._baselineMenu)
-
-            self.menu.addMenu(self._contextMenu)
-            self.menu.addSeparator()
+        self.menu.addMenu(self._contextMenu)
+        self.menu.addSeparator()
 
         return self.menu
+    
+    def nameDialog(self):
+        viewBox = self.parentWidget()
+        tsa = viewBox.tsa
+        name, ok = QInputDialog.getText(tsa, "Series name", "Series name:", text=tsa._seriesAttr(self.seriesIndex, 'name'))
+        if ok:
+            name = name.strip()
+            if name == "":
+                del tsa.data[self.seriesIndex]['name']
+            else:
+                tsa.data[self.seriesIndex]['name'] = name
+            tsa.updateUI()
     
     def styleDialog(self):
         viewBox = self.parentWidget()
         tsa = viewBox.tsa
         style = tsa._seriesAttr(self.seriesIndex, 'style')
-        tsa.styleDialog(style)
-        tsa.data[self.seriesIndex]['style'] = style
+        if tsa.styleDialog(style):
+            tsa.data[self.seriesIndex]['style'] = style
+            tsa.updatePlots()
+    
+    def removeSeries(self):
+        viewBox = self.parentWidget()
+        tsa = viewBox.tsa
+        del tsa.data[self.seriesIndex]
+        tsa.updateUI()
+
+
+class CustomLinearRegionItem(pg.LinearRegionItem):
+    def __init__(self, *args, **kwargs):
+        pg.LinearRegionItem.__init__(self, *args, **kwargs)
+
+        # context menu
+        self.menu = None
+    
+    def mouseClickEvent(self, event):
+        if event.button() == Qt.RightButton:
+            if self.boundingRect().contains(event.pos()):
+                if self.raiseContextMenu(event):
+                    event.accept()
+    
+    def raiseContextMenu(self, event):
+        menu = self.getContextMenus()
+        
+        # Let the scene add on to the end of our context menu (this is optional)
+        menu = self.scene().addParentContextMenus(self, menu, event)
+        
+        pos = event.screenPos()
+        menu.popup(QPoint(int(pos.x()), int(pos.y())))
+        return True
+    
+    def getContextMenus(self, event=None):
+        if self.menu is None:
+            # defer menu creation until needed
+            self.menu = QMenu()
+            self.menu.addAction("Delete ROI", self.removeROI)
+            self.menu.addSeparator()
+        return self.menu
+    
+    def removeROI(self):
+        viewBox = self.parentWidget()
+        viewBox.removeItem(self)
+        self.deleteLater()
 
 
 class QtTimeSeriesAnalyzer(QWidget):
@@ -474,7 +561,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         QWidget.__init__(self)
 
         # list of data series dictionaries
-        self.data = []
+        self.data = [{}]
 
         # plot styles
         self.styles = {}
@@ -503,12 +590,22 @@ class QtTimeSeriesAnalyzer(QWidget):
         self.styles['markers'] = {}
         self.styles['markers']['size'] = 10
 
-        # # Python interactive console
-        # if PythonConsole is not None:
-        #     self._console = PythonConsole()
-        #     self._console.eval_queued()
-        # else:
-        #     self._console = None
+        # Python interactive console
+        if PythonConsole is not None:
+            self._console = PythonConsole()
+            self._console.push_local_ns('self', self)
+            self._console.eval_queued()
+
+            pal = self._console.palette()
+            pal.setColor(pal.Base, QColor(82, 82, 82))
+            self._console.setPalette(pal)
+
+            self._consoleButton = QToolButton()
+            self._consoleButton.setText("Console")
+            self._consoleButton.setToolTip("Interactive Python Console")
+            self._consoleButton.clicked.connect(self.showCosole)
+        else:
+            self._console = None
 
         # widget background color
         if self.styles['figure']['background-color'] is not None:
@@ -523,7 +620,7 @@ class QtTimeSeriesAnalyzer(QWidget):
 
         self._visibleGroupsButton = QToolButton()
         self._visibleGroupsButton.setText("Groups")  # u"\U0001F441"
-        self._visibleGroupsButton.setToolTip("Visible groups")
+        self._visibleGroupsButton.setToolTip("Visible Groups")
         self._visibleGroupsButton.setPopupMode(QToolButton.InstantPopup)
         self._visibleGroupsButton.setMenu(QMenu(self._visibleGroupsButton))
         action = QWidgetAction(self._visibleGroupsButton)
@@ -537,7 +634,7 @@ class QtTimeSeriesAnalyzer(QWidget):
 
         self._visibleNamesButton = QToolButton()
         self._visibleNamesButton.setText("Names")  # u"\U0001F441"
-        self._visibleNamesButton.setToolTip("Visible names")
+        self._visibleNamesButton.setToolTip("Visible Names")
         self._visibleNamesButton.setPopupMode(QToolButton.InstantPopup)
         self._visibleNamesButton.setMenu(QMenu(self._visibleNamesButton))
         action = QWidgetAction(self._visibleNamesButton)
@@ -548,17 +645,17 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._visibleEpisodesEdit = QLineEdit()
         self._visibleEpisodesEdit.setMinimumWidth(64)
         self._visibleEpisodesEdit.setMaximumWidth(128)
-        self._visibleEpisodesEdit.setToolTip("Visible episodes")
+        self._visibleEpisodesEdit.setToolTip("Visible Episodes")
         self._visibleEpisodesEdit.textEdited.connect(self.updatePlots)
 
         self._prevEpisodeButton = QPushButton("<")
         self._prevEpisodeButton.setMaximumWidth(32)
-        self._prevEpisodeButton.setToolTip("Previous episode")
+        self._prevEpisodeButton.setToolTip("Previous Episode")
         self._prevEpisodeButton.clicked.connect(self.prevEpisode)
 
         self._nextEpisodeButton = QPushButton(">")
         self._nextEpisodeButton.setMaximumWidth(32)
-        self._nextEpisodeButton.setToolTip("Next episode")
+        self._nextEpisodeButton.setToolTip("Next Episode")
         self._nextEpisodeButton.clicked.connect(self.nextEpisode)
 
         # data table model/view
@@ -566,7 +663,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._tableView = None
         self._tableModelViewButton = QToolButton()
         self._tableModelViewButton.setText("Table")
-        self._tableModelViewButton.setToolTip("Data table")
+        self._tableModelViewButton.setToolTip("Data Table")
         self._tableModelViewButton.clicked.connect(self.editDataTable)
 
         # # baseline and scale toggles
@@ -594,6 +691,8 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._visibleGroupsButtonAction = self._topToolbar.addWidget(self._visibleGroupsButton)
         self._visibleNamesButtonAction = self._topToolbar.addWidget(self._visibleNamesButton)
         self._tableModelViewButtonAction = self._topToolbar.addWidget(self._tableModelViewButton)
+        if PythonConsole is not None:
+            self._consoleButtonAction = self._topToolbar.addWidget(self._consoleButton)
         # self._showBaselineButtonAction = self._topToolbar.addWidget(self._showBaselineButton)
         # self._applyBaselineButtonAction = self._topToolbar.addWidget(self._applyBaselineButton)
         # self._applyScaleButtonAction = self._topToolbar.addWidget(self._applyScaleButton)
@@ -603,20 +702,45 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._groupPlotsVBoxLayout.setContentsMargins(3, 3, 3, 3)
         self._groupPlotsVBoxLayout.setSpacing(3)
         self._mainGridLayout.addLayout(self._groupPlotsVBoxLayout, 1, 0)
-    
-    def numSeries(self) -> int:
-        return len(self.data)
-    
-    def addSeries(self, **kwargs):
-        seriesDict = kwargs
-        self.data.append(seriesDict)
+
         self.updateUI()
     
-    def addListOfSeries(self, listOfSeriesDicts: list):
-        self.data.extend(listOfSeriesDicts)
+    def clear(self):
+        self.data = [{}]
         self.updateUI()
     
-    def importHEKA(self, filename: str):
+    def save(self, filepath=None):
+        if filepath is None:
+            filepath, _ = QFileDialog.getSaveFileName(self, "Save Data", "", "MATLAB Data Files (*.mat)")
+        if not filepath:
+            return
+        sp.io.savemat(filepath, {"data": self.data})
+
+    def open(self, filepath=None):
+        if filepath is None:
+            filepath, _ = QFileDialog.getOpenFileName(self, "Open Data", "", "MATLAB Data Files (*.mat)")
+        if not filepath or not os.path.isfile(filepath):
+            return
+        mat = sp.io.loadmat(filepath)
+        data = mat['data']
+        data = np.squeeze(data)  # (1,N) -> (N,)
+        self.data = []
+        for i in range(data.size):
+            keys = data[i].dtype.names
+            series = {}
+            for j, key in enumerate(keys):
+                value = data[i][0][0][j]
+                value = np.squeeze(value)
+                if value.ndim == 0:
+                    for type_ in [int, float, str]:
+                        if value.dtype.type == np.dtype(type_):
+                            value = type_(value)
+                            break
+                series[key] = value
+            self.data.append(series)
+        self.updateUI()
+    
+    def importHEKA(self, filepath=None):
         """
         Import HEKA data file.
 
@@ -624,7 +748,11 @@ class QtTimeSeriesAnalyzer(QWidget):
         """
         if heka_reader is None:
             return
-        bundle = heka_reader.Bundle(filename)
+        if filepath is None:
+            filepath, _ = QFileDialog.getOpenFileName(self, "Open Data", "", "MATLAB Data Files (*.mat)")
+        if not filepath or not os.path.isfile(filepath):
+            return
+        bundle = heka_reader.Bundle(filepath)
         numHekaGroups = len(bundle.pul)
         if numHekaGroups == 0:
             return
@@ -664,8 +792,29 @@ class QtTimeSeriesAnalyzer(QWidget):
                     ylabel = trace.Label + ', ' + trace.YUnit
                     data.append({'x': x, 'y': y, 'xlabel': xlabel, 'ylabel': ylabel, 'episode': episode, 'group': group})
         if data:
-            self.addListOfSeries(data)
+            self.data = data
             self.updateUI()
+    
+    def numSeries(self) -> int:
+        return len(self.data)
+    
+    def addSeries(self, **kwargs):
+        seriesDict = kwargs
+        self.data.append(seriesDict)
+        self.updateUI()
+    
+    # def addData(self, data):
+    #     if isinstance(data, np.ndarray):
+    #         pass
+    #     elif isinstance(data, dict):
+    #         self.data.append(data)
+    #     elif isinstance(data, list):
+    #         for item in data:
+    #             if isinstance(item, np.ndarray):
+    #                 pass
+    #             elif isinstance(item, dict):
+    #                 self.data.append(item)
+    #     self.updateUI()
     
     def _seriesAttr(self, seriesIndex: int, attr):
         series = self.data[seriesIndex]
@@ -887,6 +1036,10 @@ class QtTimeSeriesAnalyzer(QWidget):
     def _onVisibleNamesChanged(self):
         self.updatePlots()
     
+    def numSelectedVisibleNames(self) -> int:
+        visibleNameIndexes = [index.row() for index in self._visibleNamesListWidget.selectedIndexes()]
+        return len(visibleNameIndexes)
+    
     def visibleEpisodes(self) -> list:
         episodes = self.episodes()
         if not episodes:
@@ -976,23 +1129,31 @@ class QtTimeSeriesAnalyzer(QWidget):
                 plot = plots[i]
             else:
                 plot = self._appendGroupPlot()
+                plots.append(plot)
             
             # get data for this group
             dataItems = plot.listCustomDataItems()
             colormap = self.styles['lines']['colormap']
             colorIndex = 0
             seriesIndexes = self._seriesIndexes(groups=[group], episodes=visibleEpisodes, names=visibleNames)
-            for j, index in enumerate(seriesIndexes):
+            j = 0
+            for index in seriesIndexes:
                 # data to plot
                 series = self.data[index]
                 x = self._seriesAttr(index, 'x')
                 y = self._seriesAttr(index, 'y')
+                if x is None or y is None:
+                    continue
                 style = self._seriesAttr(index, 'style')
 
                 color = self._styleAttr(style, 'color')
                 if color is None:
                     color = colormap[colorIndex % len(colormap)]
+                    color = [int(c) for c in color]
+                    color = QColor(*color)
                     colorIndex += 1
+                else:
+                    color = str2qcolor(color)
 
                 lineStyle = self._styleAttr(style, 'linestyle')
                 lineStyles = {
@@ -1004,6 +1165,8 @@ class QtTimeSeriesAnalyzer(QWidget):
                 lineWidth = self._styleAttr(style, 'linewidth')
                 if lineWidth is None:
                     lineWidth = self.styles['lines']['width']
+                else:
+                    lineWidth = float(lineWidth)
                 
                 if lineStyle is None:
                     linePen = None
@@ -1015,19 +1178,30 @@ class QtTimeSeriesAnalyzer(QWidget):
                     symbolSize = self._styleAttr(style, 'markersize')
                     if symbolSize is None:
                         symbolSize = self.styles['markers']['size']
+                    else:
+                        symbolSize = float(symbolSize)
 
                     symbolEdgeWidth = self._styleAttr(style, 'markeredgewidth')
                     if symbolEdgeWidth is None:
                         symbolEdgeWidth = lineWidth
+                    else:
+                        symbolEdgeWidth = float(symbolEdgeWidth)
                     
                     symbolEdgeColor = self._styleAttr(style, 'markeredgecolor')
                     if symbolEdgeColor is None:
                         symbolEdgeColor = color
+                    else:
+                        symbolEdgeColor = str2qcolor(symbolEdgeColor)
 
                     symbolFaceColor = self._styleAttr(style, 'markerfacecolor')
+                    if symbolFaceColor is None:
+                        symbolFaceColor = symbolEdgeColor
+                        symbolFaceColor.setAlpha(0)
+                    else:
+                        symbolFaceColor = str2qcolor(symbolFaceColor)
                     
                     symbolPen = pg.mkPen(color=symbolEdgeColor, width=symbolEdgeWidth)
-                    # symbolBrush = (*color[:3], 0)
+                    # symbolBrush = (symbolFaceColor.red(), symbolFaceColor.green(), symbolFaceColor.blue(), symbolFaceColor.alpha())
                 
                 if len(dataItems) > j:
                     # update existing plot data
@@ -1050,30 +1224,42 @@ class QtTimeSeriesAnalyzer(QWidget):
                     dataItem.seriesIndex = index
                     plot.addItem(dataItem)
                 
-                # axis labels (based on first plot)
-                if j == 0:
+                # axis labels (based on first plot with axis labels)
+                if j == 0 or plot.getAxis('bottom').labelText == '':
                     xlabel = self._seriesAttr(index, 'xlabel')
-                    ylabel = self._seriesAttr(index, 'ylabel')
                     plot.getAxis('bottom').setLabel(xlabel)
+                if j == 0 or plot.getAxis('left').labelText == '':
+                    ylabel = self._seriesAttr(index, 'ylabel')
                     plot.getAxis('left').setLabel(ylabel)
                 
-                # show/hide plot
-                if group in visibleGroups:
-                    plot.show()
-                else:
-                    plot.hide()
+                # next plot data item
+                j += 1
             
             # remove extra plot items
             dataItems = plot.listCustomDataItems()
-            while len(dataItems) > len(seriesIndexes):
+            while len(dataItems) > j:
                 dataItem = dataItems.pop()
                 plot.removeItem(dataItem)
                 dataItem.deleteLater()
+                
+            if j == 0:
+                # empty plot axes
+                plot.getAxis('bottom').setLabel('')
+                plot.getAxis('left').setLabel('')
+                
+            # show/hide plot
+            if group in visibleGroups:
+                plot.show()
+            else:
+                plot.hide()
         
         # remove extra plots
-        while self._groupPlotsVBoxLayout.count() > len(groups):
-            self._groupPlotsVBoxLayout.takeAt(len(groups) - 1).deleteLater()
-        
+        while len(plots) > len(groups):
+            i = len(plots) - 1
+            self._groupPlotsVBoxLayout.takeAt(i)
+            plot = plots.pop(i)
+            plot.deleteLater()
+
         # link x-axis
         if self._groupPlotsVBoxLayout.count() > 1:
             firstPlot = self._groupPlotsVBoxLayout.itemAt(0).widget()
@@ -1082,6 +1268,10 @@ class QtTimeSeriesAnalyzer(QWidget):
                 plot.setXLink(firstPlot)
     
     def updateUI(self):
+        # update data
+        while len(self.data) > 1 and self.data[0] == {}:
+            self.data.pop(0)
+
         # update widgets
         self._updateVisibleGroupsListView()
         self._updateVisibleNamesListView()
@@ -1150,19 +1340,118 @@ class QtTimeSeriesAnalyzer(QWidget):
         widgets = {}
         for key in ['linestyle', 'linewidth', 'color', 'marker', 'markersize', 'markeredgewidth', 'markeredgecolor', 'markerfacecolor']:
             value = self._styleAttr(style, key)
-            widgets[key] = QLineEdit(str(value))
+            if 'color' in key:
+                if value is None:
+                    color = QColor(255, 255, 255, 0)
+                else:
+                    color = str2qcolor(value)
+                widgets[key] = ColorButton(color)
+            else:
+                if value is None:
+                    value = ''
+                widgets[key] = QLineEdit(str(value))
             form.addRow(key, widgets[key])
         buttonBox = QDialogButtonBox()
         buttonBox.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
         buttonBox.accepted.connect(dlg.accept)
         buttonBox.rejected.connect(dlg.reject)
+        form.addRow(buttonBox)
         dlg.setWindowModality(Qt.ApplicationModal)
-        if dlg.exec_():
-            for key in widgets:
-                value = widgets[key].text().strip()
-                if value == '':
-                    value = None
+        if dlg.exec_() == QDialog.Accepted:
+            for key, widget in widgets.items():
+                if isinstance(widget, ColorButton):
+                    value = widget.color()
+                    if value.alpha() == 0:
+                        value = None
+                    else:
+                        value = qcolor2str(value)
+                elif isinstance(widget, QLineEdit):
+                    value = widget.text().strip()
+                    if value == '':
+                        value = None
                 self._setStyleAttr(style, key, value)
+            return True
+        return False
+    
+    def showCosole(self):
+        if self._console is None:
+            return
+        self._console.show()
+    
+    def traceMathDialog(self, episodes=None, groups=None):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Trace Math")
+        grid = QGridLayout(dlg)
+
+        result = QLineEdit('result')
+        lhs = QLineEdit('data')
+        rhs = QLineEdit()
+        operations = QComboBox()
+        operations.addItems(['+', '-', '*', '/'])
+
+        grid.addWidget(QLabel('name'), 0, 0)
+        grid.addWidget(result, 1, 0)
+
+        grid.addWidget(QLabel('='), 1, 1)
+
+        grid.addWidget(QLabel('name'), 0, 2)
+        grid.addWidget(lhs, 1, 2)
+
+        grid.addWidget(operations, 1, 3)
+
+        grid.addWidget(QLabel('name or value'), 0, 4)
+        grid.addWidget(rhs, 1, 4)
+
+        grid.addWidget(QLabel(''), 2, 0)  # spacer
+
+        buttonBox = QDialogButtonBox()
+        buttonBox.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        buttonBox.accepted.connect(dlg.accept)
+        buttonBox.rejected.connect(dlg.reject)
+        grid.addWidget(buttonBox, 4, 0, 1, 4)
+        dlg.setWindowModality(Qt.ApplicationModal)
+        if dlg.exec_() == QDialog.Accepted:
+            result = result.text().strip()
+            lhs = lhs.text().strip()
+            rhs = rhs.text().strip()
+            try:
+                rhs = float(rhs)
+            except ValueError:
+                pass
+            op = operations.currentText()
+
+            if episodes is None:
+                episodes = self.visibleEpisodes()
+            if groups is None:
+                groups = self.visibleGroups()
+            for episode in episodes:
+                for group in groups:
+                    seriesIndexes = self._seriesIndexes(episodes=episodes, groups=groups)
+                    names = self._dataAttr('name', seriesIndexes=seriesIndexes)
+                    if lhs not in names:
+                        continue
+                    lhsIndex = seriesIndexes[names.index(lhs)]
+                    lhsSeries = self.data[lhsIndex]
+                    if isinstance(rhs, str):
+                        if rhs not in names:
+                            continue
+                        rhsIndex = seriesIndexes[names.index(rhs)]
+                        rhsSeries = self.data[rhsIndex]
+                        rhsValue = rhsSeries['y']
+                    else:
+                        rhsValue = rhs
+                    resultSeries = copy.deepcopy(lhsSeries)
+                    resultSeries['name'] = result
+                    if op == '+':
+                        resultSeries['y'] += rhsValue
+                    elif op == '-':
+                        resultSeries['y'] -= rhsValue
+                    elif op == '*':
+                        resultSeries['y'] *= rhsValue
+                    elif op == '/':
+                        resultSeries['y'] /= rhsValue
+                    self.data.append(resultSeries)
+            self.updateUI()
 
 
 class DataTableModel(QAbstractTableModel):
@@ -1269,6 +1558,11 @@ class DataTableModel(QAbstractTableModel):
                 applyChange = QMessageBox.question(self._tsa, 'Confirm', 'Are you sure you want to change the series data?', QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
                 if applyChange == QMessageBox.No:
                     return False
+                if len(value) == len(self._data[seriesIndex][attr]):
+                    # mutate array in place
+                    self._data[seriesIndex][attr][:] = value
+                    self._tsa.updateUI()
+                    return True
             elif attr == 'style':
                 # should be a dictionary
                 try:
@@ -1309,7 +1603,65 @@ class DataTableModel(QAbstractTableModel):
                     self._columns.append(attr)
 
 
-def runAppFromReplWithoutBlocking():
+class ColorButton(QPushButton):
+    def __init__(self, color=Qt.white):
+        QPushButton.__init__(self)
+        # self.setAutoFillBackground(True)  # not needed ???
+        self.setColor(color)
+        self.clicked.connect(self.pickColor)
+    
+    def color(self):
+        pal = self.palette()
+        return pal.color(QPalette.Button)
+
+    def setColor(self, color):
+        pal = self.palette()
+        pal.setColor(QPalette.Button, color)
+        self.setPalette(pal)
+        self.update()
+    
+    def pickColor(self):
+        color = QColorDialog.getColor(self.color(), None, "Select Color", options=QColorDialog.ShowAlphaChannel)
+        if color.isValid():
+            self.setColor(color)
+    
+
+def str2qcolor(colorStr):
+    if (colorStr.startswith('(') and colorStr.endswith(')')) or (colorStr.startswith('[') and colorStr.endswith(']')):
+        rgba = [int(c) for c in colorStr[1:-1].split(',')]
+        return QColor(*rgba)
+    elif colorStr in QColor.colorNames():
+        return QColor(colorStr)
+    else:
+        return pg.mkColor(colorStr)  # ???
+
+
+def qcolor2str(color):
+    for name in QColor.colorNames():
+        if QColor(name) == color:
+            return name
+    if color.alpha() == 255:
+        return f'({color.red()},{color.green()},{color.blue()})'
+    else:
+        return f'({color.red()},{color.green()},{color.blue()},{color.alpha()})'
+
+
+def run():
+    """
+    Run the application from a REPL without blocking the REPL.
+    
+    e.g., in a REPL, run the following:
+
+    ```
+    import PyQtTimeSeriesAnalyzer
+    app, tsa = PyQtTimeSeriesAnalyzer.run()
+    ```
+
+    This will launch the application and allow you to continue using the REPL
+    where you can access the QApplication object and QtTimeSeriesAnalyzer widget
+    via the variables app and tsa, respectively.
+    """
+
     # Create the application
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
@@ -1338,5 +1690,4 @@ if __name__ == '__main__':
 
     # Show widget and run application
     tsa.show()
-    # tsa._console.show()
     sys.exit(app.exec())
