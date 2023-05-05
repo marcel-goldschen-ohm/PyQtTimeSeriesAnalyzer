@@ -8,7 +8,6 @@ TODO:
 - add attr via table view
 - hidden series (or just episodes)?
 - series tags
-- data item context menu
 - requirements.txt
 - detailed instructions in the associated README.md file
 """
