@@ -10,6 +10,7 @@ TODO:
 - series tags
 - requirements.txt
 - detailed instructions in the associated README.md file
+- menus for styles... (e.g., line, symbol, etc.)
 """
 
 
@@ -1427,7 +1428,7 @@ class QtTimeSeriesAnalyzer(QWidget):
                 groups = self.visibleGroups()
             for episode in episodes:
                 for group in groups:
-                    seriesIndexes = self._seriesIndexes(episodes=episodes, groups=groups)
+                    seriesIndexes = self._seriesIndexes(episodes=[episode], groups=[group])
                     names = self._dataAttr('name', seriesIndexes=seriesIndexes)
                     if lhs not in names:
                         continue
@@ -1451,6 +1452,8 @@ class QtTimeSeriesAnalyzer(QWidget):
                         resultSeries['y'] *= rhsValue
                     elif op == '/':
                         resultSeries['y'] /= rhsValue
+                    resultSeries['episode'] = episode
+                    resultSeries['group'] = group
                     self.data.append(resultSeries)
             self.updateUI()
 
