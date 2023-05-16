@@ -30,6 +30,7 @@ import scipy as sp
 import pyqtgraph as pg
 
 try:
+    # https://github.com/pyqtconsole/pyqtconsole
     from pyqtconsole.console import PythonConsole
 except ImportError:
     PythonConsole = None
