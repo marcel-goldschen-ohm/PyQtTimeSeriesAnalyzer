@@ -5,11 +5,13 @@ Very much still a work in progress.
 
 TODO:
 - zero, interpolate, mask
+- custom curve fit equation
 - add attr via table view
 - hidden series (or just episodes)?
 - series tags
 - requirements.txt
 - detailed instructions in the associated README.md file
+- package for pip/conda install
 - menus for styles... (e.g., line, symbol, etc.)
 """
 
@@ -18,17 +20,18 @@ __author__ = "Marcel P. Goldschen-Ohm"
 __author_email__ = "goldschen-ohm@utexas.edu, marcel.goldschen@gmail.com"
 
 
-try:
-    from PyQt5.QtCore import *
-    from PyQt5.QtGui import *
-    from PyQt5.QtWidgets import *
-except ImportError:
-    raise ImportError("Requires PyQt5")
-
 import sys, os, re, ast, copy
 import numpy as np
 import scipy as sp
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+from PyQt5.QtWidgets import *
 import pyqtgraph as pg
+
+try:
+    import lmfit
+except ImportError:
+    lmfit = None
 
 try:
     # https://github.com/pyqtconsole/pyqtconsole
@@ -110,6 +113,15 @@ class CustomViewBox(pg.ViewBox):
         self._drawingROI = None
         self._drawingROIStartPos = None
 
+        # ROI context menu
+        self._roiMenu = QMenu("ROI")
+        self._roiMenu.addAction("Draw X axis ROIs", lambda: self.startDrawingROIs(orientation="vertical"))
+        self._roiMenu.addSeparator()
+        self._roiMenu.addAction("Show ROIs", self.showROIs)
+        self._roiMenu.addAction("Hide ROIs", self.hideROIs)
+        self._roiMenu.addSeparator()
+        self._roiMenu.addAction("Clear ROIs", self.clearROIs)
+
         # Measurement context menu
         self._measureMenu = QMenu("Measure")
         self._measureMenu.addAction("Mean", lambda: self.measure(measurementType="mean"))
@@ -118,28 +130,18 @@ class CustomViewBox(pg.ViewBox):
         self._measureMenu.addAction("Max", lambda: self.measure(measurementType="max"))
         self._measureMenu.addAction("AbsMax", lambda: self.measure(measurementType="absmax"))
 
-        # ROI context menu
-        self._roiMenu = QMenu("ROI")
-        self._roiMenu.addAction("Draw X axis ROIs", lambda: self.startDrawingROIs(orientation="vertical"))
-        self._roiMenu.addSeparator()
-        self._roiMenu.addMenu(self._measureMenu)
-        self._roiMenu.addSeparator()
-        self._roiMenu.addAction("Show ROIs", self.showROIs)
-        self._roiMenu.addAction("Hide ROIs", self.hideROIs)
-        self._roiMenu.addSeparator()
-        self._roiMenu.addAction("Clear ROIs", self.clearROIs)
-
         # Curve fit context menu
         self._fitMenu = QMenu("Curve Fit")
         self._fitMenu.addAction("Mean", lambda: self.curveFit(fitType="mean"))
         self._fitMenu.addAction("Line", lambda: self.curveFit(fitType="line"))
         self._fitMenu.addAction("Polynomial", lambda: self.curveFit(fitType="polynomial"))
         self._fitMenu.addAction("Spline", lambda: self.curveFit(fitType="spline"))
-        self._fitMenu.addAction("Custom", lambda: self.curveFit(fitType="custom"))
+        self._fitMenu.addAction("Custom", lambda method="custom": self.curveFit(fitType=method))
 
         # Context menu (added on to default context menu)
         self.menu.addSeparator()
         self.menu.addMenu(self._roiMenu)
+        self.menu.addMenu(self._measureMenu)
         self.menu.addMenu(self._fitMenu)
         self.menu.addAction("Trace Math", self.traceMathDialog)
         self.menu.addSeparator()
@@ -251,6 +253,59 @@ class CustomViewBox(pg.ViewBox):
             #         self.parentWidget().parentWidget(), "Spline Fit", "Smoothing (0-inf):", 0, 0, float(1e9), 9)
             #     if not ok:
             #         return
+        elif fitType == "custom":
+            if 'equation' not in fitParams:
+                fitParams['equation'], ok = QInputDialog.getText(
+                    self.parentWidget().parentWidget(), "Custom Fit", "Equation y(x):", QLineEdit.Normal, "a * x**2 + b * x + c")
+                if not ok:
+                    return
+                fitModel = lmfit.models.ExpressionModel(fitParams['equation'], independent_vars=['x'])
+                # initialize fit params
+                fitParams['initial_values'] = {}
+                fitParams['bounds'] = {}
+                dlg = QDialog(self.tsa)
+                dlg.setWindowTitle("Fit Parameters")
+                grid = QGridLayout(dlg)
+                grid.addWidget(QLabel(fitParams['equation']), 0, 0, 1, 4)
+                grid.addWidget(QLabel(" "), 1, 0, 1, 4)
+                grid.addWidget(QLabel("Min"), 2, 1)
+                grid.addWidget(QLabel("Init"), 2, 2)
+                grid.addWidget(QLabel("Max"), 2, 3)
+                row = 3
+                for param in fitModel.param_names:
+                    start, lbnd, ubnd = QLineEdit("1"), QLineEdit(), QLineEdit()
+                    fitParams['initial_values'][param] = start
+                    fitParams['bounds'][param] = [lbnd, ubnd]
+                    grid.addWidget(QLabel(param), row, 0)
+                    grid.addWidget(lbnd, row, 1)
+                    grid.addWidget(start, row, 2)
+                    grid.addWidget(ubnd, row, 3)
+                    row += 1
+                buttonBox = QDialogButtonBox()
+                buttonBox.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+                buttonBox.accepted.connect(dlg.accept)
+                buttonBox.rejected.connect(dlg.reject)
+                grid.addWidget(QLabel(" "), row, 0, 1, 4)
+                grid.addWidget(buttonBox, row + 1, 0, 1, 4)
+                dlg.setWindowModality(Qt.ApplicationModal)
+                if dlg.exec_() != QDialog.Accepted:
+                    return
+                for param in fitModel.param_names:
+                    start = float(fitParams['initial_values'][param].text())
+                    fitParams['initial_values'][param] = start
+                    hint = {}
+                    hint['value'] = start
+                    try:
+                        lbnd = float(fitParams['bounds'][param][0].text())
+                        hint['min'] = lbnd
+                    except ValueError:
+                        lbnd = None
+                    try:
+                        ubnd = float(fitParams['bounds'][param][1].text())
+                        hint['max'] = ubnd
+                    except ValueError:
+                        ubnd = None
+                    fitModel.set_param_hint(param, **hint)
 
         # fit each data item
         fits = []
@@ -298,8 +353,9 @@ class CustomViewBox(pg.ViewBox):
                 tck = sp.interpolate.splrep(fx, fy, t=knots)
                 yfit = sp.interpolate.splev(xfit, tck, der=0)
             elif fitType == "custom":
-                # TODO: implement custom fit
-                pass
+                result = fitModel.fit(fy, x=fx, **fitParams['initial_values'])
+                # print(result.fit_report())
+                yfit = fitModel.eval(result.params, x=xfit)
 
             # fit series data
             fit = {'x': xfit, 'y': yfit}
