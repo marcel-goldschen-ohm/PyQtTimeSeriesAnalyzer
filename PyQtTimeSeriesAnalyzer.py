@@ -858,8 +858,8 @@ class QtTimeSeriesAnalyzer(QWidget):
             ['color', 'c'],
             ['linestyle', 'ls'],
             ['linewidth', 'lw'],
-            ['marker'],
-            ['markersize', 'ms', 'size'],
+            ['marker', 'm'],
+            ['markersize', 'ms'],
             ['markeredgewidth', 'mew'],
             ['markeredgecolor', 'mec'],
             ['markerfacecolor', 'mfc']
@@ -884,8 +884,8 @@ class QtTimeSeriesAnalyzer(QWidget):
             ['color', 'c'],
             ['linestyle', 'ls'],
             ['linewidth', 'lw'],
-            ['marker'],
-            ['markersize', 'ms', 'size'],
+            ['marker', 'm'],
+            ['markersize', 'ms'],
             ['markeredgewidth', 'mew'],
             ['markeredgecolor', 'mec'],
             ['markerfacecolor', 'mfc']
@@ -1146,13 +1146,15 @@ class QtTimeSeriesAnalyzer(QWidget):
                 style = self._seriesAttr(index, 'style')
 
                 color = self._styleAttr(style, 'color')
-                if color is None:
+                if color is not None:
+                    color = str2color(color)
+                if color is None or (len(color) == 4 and color[3] == 0):
                     color = colormap[colorIndex % len(colormap)]
                     color = [int(c) for c in color]
-                    color = QColor(*color)
+                    if len(color) == 3:
+                        color.append(255)
+                    color = tuple(color)
                     colorIndex += 1
-                else:
-                    color = str2qcolor(color)
 
                 lineStyle = self._styleAttr(style, 'linestyle')
                 lineStyles = {
@@ -1190,17 +1192,15 @@ class QtTimeSeriesAnalyzer(QWidget):
                     if symbolEdgeColor is None:
                         symbolEdgeColor = color
                     else:
-                        symbolEdgeColor = str2qcolor(symbolEdgeColor)
+                        symbolEdgeColor = str2color(symbolEdgeColor)
 
                     symbolFaceColor = self._styleAttr(style, 'markerfacecolor')
                     if symbolFaceColor is None:
-                        symbolFaceColor = symbolEdgeColor
-                        symbolFaceColor.setAlpha(0)
+                        symbolFaceColor = symbolEdgeColor[:3] + (0,)
                     else:
-                        symbolFaceColor = str2qcolor(symbolFaceColor)
+                        symbolFaceColor = str2color(symbolFaceColor)
                     
                     symbolPen = pg.mkPen(color=symbolEdgeColor, width=symbolEdgeWidth)
-                    # symbolBrush = (symbolFaceColor.red(), symbolFaceColor.green(), symbolFaceColor.blue(), symbolFaceColor.alpha())
                 
                 if len(dataItems) > j:
                     # update existing plot data
@@ -1218,8 +1218,9 @@ class QtTimeSeriesAnalyzer(QWidget):
                     if symbol is None:
                         dataItem = CustomPlotDataItem(x, y, pen=linePen)
                     else:
-                        dataItem = CustomPlotDataItem(x, y, pen=linePen, 
-                            symbol=symbol, symbolSize=symbolSize, symbolPen=symbolPen, symbolBrush=symbolFaceColor)
+                        dataItem = CustomPlotDataItem(x, y, pen=linePen, symbol=symbol, symbolSize=symbolSize)
+                        dataItem.setSymbolPen(symbolPen)
+                        dataItem.setSymbolBrush(symbolFaceColor)
                     dataItem.seriesIndex = index
                     plot.addItem(dataItem)
                 
@@ -1341,7 +1342,7 @@ class QtTimeSeriesAnalyzer(QWidget):
             value = self._styleAttr(style, key)
             if 'color' in key:
                 if value is None:
-                    color = QColor(255, 255, 255, 0)
+                    color = QColor('transparent')
                 else:
                     color = str2qcolor(value)
                 widgets[key] = ColorButton(color)
@@ -1360,7 +1361,7 @@ class QtTimeSeriesAnalyzer(QWidget):
             for key, widget in widgets.items():
                 if isinstance(widget, ColorButton):
                     value = widget.color()
-                    if value.alpha() == 0:
+                    if value == QColor('transparent'):
                         value = None
                     else:
                         value = qcolor2str(value)
@@ -1625,6 +1626,17 @@ class ColorButton(QPushButton):
             self.setColor(color)
     
 
+def str2color(colorStr):
+    if (colorStr.startswith('(') and colorStr.endswith(')')) or (colorStr.startswith('[') and colorStr.endswith(']')):
+        rgba = [int(c) for c in colorStr[1:-1].split(',')]
+        if len(rgba) == 3:
+            rgba.append(255)
+        return tuple(rgba)
+    elif colorStr in QColor.colorNames():
+        qcolor = QColor(colorStr)
+        return qcolor.red(), qcolor.green(), qcolor.blue(), qcolor.alpha()
+
+
 def str2qcolor(colorStr):
     if (colorStr.startswith('(') and colorStr.endswith(')')) or (colorStr.startswith('[') and colorStr.endswith(']')):
         rgba = [int(c) for c in colorStr[1:-1].split(',')]
@@ -1682,10 +1694,10 @@ if __name__ == '__main__':
     tsa = QtTimeSeriesAnalyzer()
 
     # testing
-    tsa.importHEKA('heka.dat')
-    # for i in range(10):
-    #     tsa.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Current, pA", group="I", episode=i)
-    #     tsa.addSeries(y=np.random.random(100), xlabel="Time, s", ylabel="Voltage, mV", group="V", episode=i)
+    # tsa.importHEKA('heka.dat')
+    for i in range(2):
+        tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Current, pA", group="I", episode=i)
+        tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Voltage, mV", group="V", episode=i)
 
     # Show widget and run application
     tsa.show()
