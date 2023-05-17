@@ -5,14 +5,15 @@ Very much still a work in progress.
 
 TODO:
 - zero, interpolate, mask
-- custom curve fit equation
 - add attr via table view
 - hidden series (or just episodes)?
-- series tags
+- series tags, tag filter
+- dropdown menus for styles... (e.g., line, symbol, etc.)
+- refactor for generic series selection and analysis (fits, measures)
+- allow 2D or 3D series data?
 - requirements.txt
 - detailed instructions in the associated README.md file
 - package for pip/conda install
-- menus for styles... (e.g., line, symbol, etc.)
 """
 
 
