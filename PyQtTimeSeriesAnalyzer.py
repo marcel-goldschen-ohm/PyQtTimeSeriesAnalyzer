@@ -4,10 +4,11 @@ PyQtTimeSeriesAnalyzer.py
 Very much still a work in progress.
 
 TODO:
+- fix delete series group error
 - zero, interpolate, mask
 - link ROIs across plots
 - edit x, y data in new popup table view
-- add attr via table view
+- add series, attr via table view
 - hidden series (or just episodes)?
 - series tags, tag filter
 - dropdown menus for styles... (e.g., line, symbol, etc.)
@@ -32,21 +33,21 @@ from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 import pyqtgraph as pg
 
-# Icons.
+# OPTIONAL: For some nice icons.
 try:
     # https://github.com/spyder-ide/qtawesome
     import qtawesome as qta
 except ImportError:
     qta = None
 
-# Only needed for fitting custom curve equations.
+# OPTIONAL: Only needed for fitting custom curve equations.
 try:
     import lmfit
 except ImportError:
     lmfit = None
 
 # OPTIONAL: Interactive python console for the UI.
-# !!! The run() function in this module will provide a better console experience alongside the UI than pyqtconsole.
+# !!! The run() function in this module will probably provide a better console experience alongside the UI than pyqtconsole.
 try:
     # https://github.com/pyqtconsole/pyqtconsole
     from pyqtconsole.console import PythonConsole
@@ -56,7 +57,7 @@ except ImportError:
 # OPTIONAL: For importing HEKA data files.
 try:
     # https://github.com/campagnola/heka_reader
-    # Just put heka_reader.py in the same directory as this file.
+    # e.g., Just put heka_reader.py in the same directory as this file.
     import heka_reader
 except ImportError:
     heka_reader = None
@@ -74,6 +75,7 @@ class QtTimeSeriesAnalyzer(QWidget):
     -----------------
     Each series is stored in a dictionary such as { x=..., y=..., xlabel=..., ylabel=..., etc. } for maximum flexibility.
     Multiple series are stored in a list of such dictionaries.
+    !!! Currently all series are expected to share the same x-axis units. As such, the x-axis of all plots in the UI are linked.
 
     Each series dictionary can have any number of attributes for maximum flexibility.
     Currently, the following series attributes are used by the UI:
@@ -102,10 +104,14 @@ class QtTimeSeriesAnalyzer(QWidget):
                         markeredgecolor (mec): RGB or RGBA tuple (0-255) for marker edge color. Defaults to color.
                         markerfacecolor (mfc): RGB or RGBA tuple (0-255) for marker face color. Defaults to markeredgecolor.
     
+    File I/O
+    --------
+    Load/Save all series and ROI data from/to a MATLAB .mat file (main menu -> File -> Open/Save).
+    This allows simple interoperation with MATLAB (Python list of dicts <-> MATLAB struct array).
+    
     User Interface (UI)
     -------------------
-    Top toolbar includes main menu (File I/O, Data Table, etc.), episode traversal, and series visibility controls.
-
+    Top toolbar includes main menu, episode traversal, and series visibility controls.
     The UI organizes multiple series by (episode, group, name).
     The UI includes a plot for each visible group stacked vertically.
     Visible groups can be quickly toggled on/off from a dropdown menu.
@@ -129,15 +135,15 @@ class QtTimeSeriesAnalyzer(QWidget):
     def __init__(self):
         QWidget.__init__(self)
 
-        # List of data series dictionaries {x=..., y=..., episode=0, group=2, name=..., style=..., etc.}
+        # List of data series dictionaries { x=..., y=..., xlabel=..., ylabel=..., episode=0, group=2, name=..., style=..., etc. }
         # If you change this manually, call updateUI() to update the UI.
         # !!! Currently only handles 1D series data.
         self.data = []
 
-        # ROIs[group] = list of group's region of interest (ROI) dictionaries {limits=[[xmin, xmax], [ymin, ymax]], name=...}
+        # List of region of interest (ROI) dictionaries { xlim=(xmin, xmax), name=... }
         # If you change this manually, call updateUI() to update the UI.
-        # !!! Currently only handles x-axis ranges (i.e., ymin=-inf, ymax=inf)
-        self.ROIs = {}
+        # !!! Currently only handles x-axis ranges (i.e., ylim is assumed to be [-inf, inf]).
+        self.ROIs = []
 
         # Dictionary of default colors, fonts, etc.
         # !!! The default UI theme may not be appropriate for you. Feel free to edit the colors and fonts in defaultState().
@@ -147,6 +153,34 @@ class QtTimeSeriesAnalyzer(QWidget):
         # UI
         self.initUI()
         self.updateUI()
+    
+    def defaultState(self):
+        state = {}
+        state['figure'] = {}
+        state['figure']['background-color'] = None  # None ==> use system default
+        state['axes'] = {}
+        state['axes']['background-color'] = [220, 220, 220]
+        state['axes']['foreground-color'] = [128, 128, 128]
+        state['axes']['label-font-name'] = 'Helvetica'
+        state['axes']['label-font-size'] = 14
+        state['axes']['label-font-weight'] = QFont.Normal
+        state['axes']['tick-font-name'] = 'Helvetica'
+        state['axes']['tick-font-size'] = 10
+        state['axes']['tick-font-weight'] = QFont.Thin
+        state['line'] = {}
+        state['line']['width'] = 2
+        state['line']['colormap'] = [
+            [0, 113.9850, 188.9550],
+            [216.7500, 82.8750, 24.9900],
+            [236.8950, 176.9700, 31.8750],
+            [125.9700, 46.9200, 141.7800],
+            [118.8300, 171.8700, 47.9400],
+            [76.7550, 189.9750, 237.9150],
+            [161.9250, 19.8900, 46.9200]
+        ]
+        state['marker'] = {}
+        state['marker']['size'] = 10
+        return state
     
     # I/O
     
@@ -320,35 +354,7 @@ class QtTimeSeriesAnalyzer(QWidget):
                         pass
         return value
     
-    def defaultState(self):
-        state = {}
-        state['figure'] = {}
-        state['figure']['background-color'] = None  # None ==> use system default
-        state['axes'] = {}
-        state['axes']['background-color'] = [220, 220, 220]
-        state['axes']['foreground-color'] = [128, 128, 128]
-        state['axes']['label-font-name'] = 'Helvetica'
-        state['axes']['label-font-size'] = 14
-        state['axes']['label-font-weight'] = QFont.Normal
-        state['axes']['tick-font-name'] = 'Helvetica'
-        state['axes']['tick-font-size'] = 10
-        state['axes']['tick-font-weight'] = QFont.Thin
-        state['line'] = {}
-        state['line']['width'] = 2
-        state['line']['colormap'] = [
-            [0, 113.9850, 188.9550],
-            [216.7500, 82.8750, 24.9900],
-            [236.8950, 176.9700, 31.8750],
-            [125.9700, 46.9200, 141.7800],
-            [118.8300, 171.8700, 47.9400],
-            [76.7550, 189.9750, 237.9150],
-            [161.9250, 19.8900, 46.9200]
-        ]
-        state['marker'] = {}
-        state['marker']['size'] = 10
-        return state
-    
-    # Series plot style
+    # Series plot styles
     
     def _styleAttr(self, style: dict, attr):
         attr = attr.lower()
@@ -442,42 +448,6 @@ class QtTimeSeriesAnalyzer(QWidget):
                 self._setStyleAttr(style, key, value)
             return True
         return False
-    
-    # Group ROIs
-
-    def getROIs(self, groups=None) -> list:
-        allgroups = self.groups()
-        if groups is None:
-            groups = allgroups
-        plots = self._groupPlots()
-        rois = []
-        for group in groups:
-            i = allgroups.index(group)
-            plot = plots[i]
-            for roi in plot.getViewBox().getROIs():
-                rois.append({'xlim': roi.getRegion(), 'group': group, 'name': roi.nameLabel.text})
-        return rois
-    
-    def setROIs(self, rois: list):
-        self.clearROIs()
-        self.addROIs(rois)
-
-    def addROIs(self, rois: list):
-        groups = self.groups()
-        plots = self._groupPlots()
-        for roi in rois:
-            group = roi['group']
-            if group not in groups:
-                continue
-            i = groups.index(group)
-            plot = plots[i]
-            lri = LinearRegionItem(plot.getViewBox(), orientation='vertical', values=roi['xlim'])
-            lri.nameLabel.setText(roi['name'])
-            lri.updateNameLabel()
-
-    def clearROIs(self):
-        for plot in self._groupPlots():
-            plot.getViewBox().clearROIs()
     
     # Series organization by episode, group, and name
     
@@ -685,6 +655,61 @@ class QtTimeSeriesAnalyzer(QWidget):
         visibleNameIndexes = [index.row() for index in self._visibleNamesListWidget.selectedIndexes()]
         return len(visibleNameIndexes)
     
+    # ROIs
+
+    def rois(self, names=None) -> list:
+        if names is None:
+            return self.ROIs
+        rois = []
+        for roi in self.ROIs:
+            name = roi['name'] if 'name' in roi else ''
+            if names is None or name in names:
+                rois.append(roi)
+        return rois
+    
+    def roiNames(self) -> list:
+        names = []
+        for roi in self.ROIs:
+            name = roi['name'] if 'name' in roi else ''
+            if name not in names:
+                names.append(name)
+        return names
+    
+    # Visible ROIs (grouped by name)
+
+    def visibleROINames(self) -> list:
+        roiNames = self.roiNames()
+        if not roiNames:
+            return []
+        visibleIndexes = [index.row() for index in self._visibleROINamesListWidget.selectedIndexes()]
+        visibleROINames = [roiNames[i] for i in visibleIndexes if i < len(roiNames)]
+        return visibleROINames if visibleROINames else roiNames
+    
+    def setVisibleROINames(self, visibleROINames: list):
+        roiNames = self.roiNames()
+        self._visibleROINamesListWidget.itemSelectionChanged.disconnect()
+        self._visibleROINamesListWidget.clear()
+        self._visibleROINamesListWidget.addItems(roiNames)
+        for roiName in visibleROINames:
+            if roiName in roiNames:
+                self._visibleROINamesListWidget.item(roiNames.index(roiName)).setSelected(True)
+        self._visibleROINamesListWidget.itemSelectionChanged.connect(self._onVisibleROINamesChanged)
+        self._onVisibleROINamesChanged()
+    
+    def _updateVisibleROINamesListView(self):
+        roiNames = self.roiNames()
+        visibleIndexes = [index.row() for index in self._visibleROINamesListWidget.selectedIndexes()]
+        self._visibleROINamesListWidget.itemSelectionChanged.disconnect()
+        self._visibleROINamesListWidget.clear()
+        self._visibleROINamesListWidget.addItems(roiNames)
+        for i in visibleIndexes:
+            if i < len(roiNames):
+                self._visibleROINamesListWidget.item(i).setSelected(True)
+        self._visibleROINamesListWidget.itemSelectionChanged.connect(self._onVisibleROINamesChanged)
+    
+    def _onVisibleROINamesChanged(self):
+        self.updatePlots()
+    
     # UI
     
     def sizeHint(self):
@@ -752,7 +777,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._visibleGroupsListWidget.itemSelectionChanged.connect(self._onVisibleGroupsChanged)
 
         self._visibleGroupsButton = QToolButton()
-        self._visibleGroupsButton.setText("Groups")  # u"\U0001F441"
+        self._visibleGroupsButton.setText("Groups")
         self._visibleGroupsButton.setToolTip("Visible Groups")
         self._visibleGroupsButton.setPopupMode(QToolButton.InstantPopup)
         self._visibleGroupsButton.setMenu(QMenu(self._visibleGroupsButton))
@@ -766,13 +791,27 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._visibleNamesListWidget.itemSelectionChanged.connect(self._onVisibleNamesChanged)
 
         self._visibleNamesButton = QToolButton()
-        self._visibleNamesButton.setText("Names")  # u"\U0001F441"
+        self._visibleNamesButton.setText("Names")
         self._visibleNamesButton.setToolTip("Visible Names")
         self._visibleNamesButton.setPopupMode(QToolButton.InstantPopup)
         self._visibleNamesButton.setMenu(QMenu(self._visibleNamesButton))
         action = QWidgetAction(self._visibleNamesButton)
         action.setDefaultWidget(self._visibleNamesListWidget)
         self._visibleNamesButton.menu().addAction(action)
+
+        # visible ROI selection
+        self._visibleROINamesListWidget = QListWidget()
+        self._visibleROINamesListWidget.setSelectionMode(QAbstractItemView.MultiSelection)
+        self._visibleROINamesListWidget.itemSelectionChanged.connect(self._onVisibleROINamesChanged)
+
+        self._visibleROINamesButton = QToolButton()
+        self._visibleROINamesButton.setText("ROIs")
+        self._visibleROINamesButton.setToolTip("Visible ROIs")
+        self._visibleROINamesButton.setPopupMode(QToolButton.InstantPopup)
+        self._visibleROINamesButton.setMenu(QMenu(self._visibleROINamesButton))
+        action = QWidgetAction(self._visibleROINamesButton)
+        action.setDefaultWidget(self._visibleROINamesListWidget)
+        self._visibleROINamesButton.menu().addAction(action)
 
         # # baseline and scale toggles
         # self._showBaselineButton = QToolButton()
@@ -826,6 +865,7 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._nextEpisodeButtonAction = self._topToolbar.addWidget(self._nextEpisodeButton)
         self._visibleGroupsButtonAction = self._topToolbar.addWidget(self._visibleGroupsButton)
         self._visibleNamesButtonAction = self._topToolbar.addWidget(self._visibleNamesButton)
+        self._visibleROINamesButtonAction = self._topToolbar.addWidget(self._visibleROINamesButton)
         # self._showBaselineButtonAction = self._topToolbar.addWidget(self._showBaselineButton)
         # self._applyBaselineButtonAction = self._topToolbar.addWidget(self._applyBaselineButton)
         # self._applyScaleButtonAction = self._topToolbar.addWidget(self._applyScaleButton)
@@ -871,6 +911,8 @@ class QtTimeSeriesAnalyzer(QWidget):
         self._visibleGroupsButtonAction.setVisible(showGroupControls)
         showNameControls = len(self.names()) > 1
         self._visibleNamesButtonAction.setVisible(showNameControls)
+        showROIControls = len(self.roiNames()) > 1
+        self._visibleROINamesButtonAction.setVisible(showROIControls)
 
         # update table model/view
         if self._tableView is not None and self._tableView.isVisible():
@@ -878,9 +920,10 @@ class QtTimeSeriesAnalyzer(QWidget):
     
     def updatePlots(self):
         # one plot per group, arranged vertically
-        visibleGroups = self.visibleGroups()
         visibleEpisodes = self.visibleEpisodes()
+        visibleGroups = self.visibleGroups()
         visibleNames = self.visibleNames()
+        visibleROINames = self.visibleROINames()
         groups = self.groups()
         plots = self._groupPlots()
         for i, group in enumerate(groups):
@@ -1005,6 +1048,10 @@ class QtTimeSeriesAnalyzer(QWidget):
                 dataItem = dataItems.pop()
                 plot.removeItem(dataItem)
                 dataItem.deleteLater()
+            
+            # TODO: get ROIs for this group
+
+            # TODO: remove extra ROI items
                 
             if j == 0:
                 # empty plot axes
@@ -1644,7 +1691,7 @@ class PlotDataItem(pg.PlotDataItem):
         if name is None or name == "":
             name = f"Series {self.seriesIndex}"
         else:
-            name += f" [{self.seriesIndex}]"
+            name = f"Series {self.seriesIndex}: " + name
         
         self._seriesMenu = QMenu(name)
 
