@@ -33,7 +33,7 @@ from PyQt5.QtGui import *
 from PyQt5.QtWidgets import *
 import pyqtgraph as pg
 
-# OPTIONAL: For some nice icons.
+# OPTIONAL: For some nice icons. Highly recommended.
 try:
     # https://github.com/spyder-ide/qtawesome
     import qtawesome as qta
@@ -63,9 +63,8 @@ except ImportError:
     heka_reader = None
 
 
-pg.setConfigOption('foreground', 'k')   # Default foreground color for text, lines, axes, etc.
-pg.setConfigOption('background', None)  # Default background for GraphicsView.
-# pg.setConfigOptions(antialias=True)     # Draw lines with smooth edges at the cost of reduced performance. !!! HUGE COST
+pg.setConfigOption('background', (200, 200, 200))  # Default background for plots.
+pg.setConfigOption('foreground', (0, 0, 0))   # Default foreground color for text, lines, axes, etc.
 
 
 class QtTimeSeriesAnalyzer2(QWidget):
@@ -74,43 +73,356 @@ class QtTimeSeriesAnalyzer2(QWidget):
     def __init__(self, parent=None):
         QWidget.__init__(self, parent)
 
+        self.data = []
+
         self.initUI()
         self.updateUI()
     
+    def sizeHint(self):
+        return QSize(800, 600)
+    
+    def addSeries(self, **kwargs):
+        seriesDict = kwargs
+        self.data.append(seriesDict)
+        self.updateUI()
+    
+    def seriesAttr(self, attr, seriesDictOrIndexOrListThereof=None):
+        if seriesDictOrIndexOrListThereof is None:
+            # default to list of all series indexes
+            seriesDictOrIndexOrListThereof = list(range(len(self.data)))
+
+        if isinstance(seriesDictOrIndexOrListThereof, int):
+            index = seriesDictOrIndexOrListThereof
+            series = self.data[index]
+        elif isinstance(seriesDictOrIndexOrListThereof, dict):
+            index = None
+            series = seriesDictOrIndexOrListThereof
+        elif isinstance(seriesDictOrIndexOrListThereof, list):
+            seriesDictOrIndexList = seriesDictOrIndexOrListThereof
+            values = [self.seriesAttr(attr, seriesDictOrIndex) for seriesDictOrIndex in seriesDictOrIndexList]
+            return values
+        else:
+            raise TypeError('Input must be either a series index or a series dict or a list thereof.')
+        
+        value = series[attr] if attr in series else None
+
+        if value is None:
+            # default values
+            if attr == 'x':
+                if 'y' in series:
+                    N = len(series['y'])
+                    value = np.arange(N)
+            elif attr in ['xlabel', 'ylabel']:
+                value = ''
+            elif attr == 'episode':
+                # assign episode based on index of series within all series having the same group and name
+                if index is None:
+                    index = self.data.index(series)
+                group = self.seriesAttr('group', series)
+                name = self.seriesAttr('name', series)
+                indexes = self.seriesIndexes(groups=[group], names=[name])
+                value = indexes.index(index)
+            elif attr == 'group':
+                value = 0
+            # elif attr == 'name':
+            #     value = ''
+            elif attr == 'style':
+                value = {}
+            # elif attr == 'labels':
+            #     value = []
+            # elif attr == 'xlink':
+            #     value = 0
+        elif attr == 'x':
+            # convert sample interval to 1D array?
+            if isinstance(value, float) or isinstance(value, int):
+                if 'y' in series:
+                    N = len(series['y'])
+                    if N > 1:
+                        value = np.arange(N) * value
+        
+        return value
+    
+    def setSeriesAttr(self, attr, value, seriesDictOrIndexOrListThereof=None):
+        if seriesDictOrIndexOrListThereof is None:
+            # default to list of all series indexes
+            seriesDictOrIndexOrListThereof = list(range(len(self.data)))
+
+        if isinstance(seriesDictOrIndexOrListThereof, int):
+            index = seriesDictOrIndexOrListThereof
+            series = self.data[index]
+        elif isinstance(seriesDictOrIndexOrListThereof, dict):
+            index = None
+            series = seriesDictOrIndexOrListThereof
+        elif isinstance(seriesDictOrIndexOrListThereof, list):
+            seriesDictOrIndexList = seriesDictOrIndexOrListThereof
+            for seriesDictOrIndex in seriesDictOrIndexList:
+                self.setSeriesAttr(attr, value, seriesDictOrIndex)
+            return
+        else:
+            raise TypeError('Input must be either a series index or a series dict or a list thereof.')
+        
+        if value is None:
+            if attr in series:
+                del series[attr]
+            return
+        
+        series[attr] = value
+    
+    def styleAttr(self, style: dict, attr):
+        attr = attr.lower()
+        value = style[attr] if attr in style else None
+        if value is not None:
+            return value
+        
+        # search for an associated attr
+        attrGroups = [
+            ['color', 'c'],
+            ['linestyle', 'ls'],
+            ['linewidth', 'lw'],
+            ['marker', 'm'],
+            ['markersize', 'ms'],
+            ['markeredgewidth', 'mew'],
+            ['markeredgecolor', 'mec'],
+            ['markerfacecolor', 'mfc']
+        ]
+        for attrGroup in attrGroups:
+            if attr in attrGroup:
+                for key in attrGroup:
+                    if key in style:
+                        return style[key]
+                return None
+        
+        return None
+    
+    def setStyleAttr(self, style: dict, attr, value):
+        # if attr in ['color', 'c']:
+        #     # transparent color => None
+        #     if len(value) == 4 and value[3] == 0:
+        #         value = None
+        
+        attr = attr.lower()
+        if attr in style:
+            if value is None:
+                del style[attr]
+            else:
+                style[attr] = value
+            return
+
+        # search for an associated attr
+        attrGroups = [
+            ['color', 'c'],
+            ['linestyle', 'ls'],
+            ['linewidth', 'lw'],
+            ['marker', 'm'],
+            ['markersize', 'ms'],
+            ['markeredgewidth', 'mew'],
+            ['markeredgecolor', 'mec'],
+            ['markerfacecolor', 'mfc']
+        ]
+        for attrGroup in attrGroups:
+            if attr in attrGroup:
+                for key in attrGroup:
+                    if key in style:
+                        if value is None:
+                            del style[key]
+                        else:
+                            style[key] = value
+                        return
+        
+        if value is not None:
+            style[attr] = value
+    
+    def seriesIndexes(self, episodes=None, groups=None, names=None) -> list:
+        indexes = []
+        for i in range(len(self.data)):
+            if episodes is None or self.seriesAttr('episode', i) in episodes:
+                if groups is None or self.seriesAttr('group', i) in groups:
+                    if names is None or self.seriesAttr('name', i) in names:
+                        indexes.append(i)
+        return indexes
+    
+    def seriesEpisodes(self, seriesIndexes=None) -> list:
+        return np.unique(self.seriesAttr('episode', seriesIndexes)).tolist()
+    
+    def seriesGroups(self, seriesIndexes=None) -> list:
+        if isinstance(seriesIndexes, int):
+            seriesIndexes = [seriesIndexes]
+        groups = []
+        for group in self.seriesAttr('group', seriesIndexes):
+            if group not in groups:
+                groups.append(group)
+        if groups and np.all([isinstance(group, int) for group in groups]):
+            groups = sorted(groups)
+        return groups
+    
+    def seriesNames(self, seriesIndexes=None) -> list:
+        if isinstance(seriesIndexes, int):
+            seriesIndexes = [seriesIndexes]
+        names = []
+        for name in self.seriesAttr('name', seriesIndexes):
+            if name not in names:
+                names.append(name)
+        return names
+    
+    def groupNames(self, groups=None) -> list:
+        if groups is None:
+            groups = self.seriesGroups()
+        names = []
+        for group in groups:
+            name = group if isinstance(group, str) else str(group)
+            if isinstance(group, int):
+                # name -> int: ylabel
+                indexes = self.seriesIndexes(groups=[group])
+                for index in indexes:
+                    ylabel = self.seriesAttr('ylabel', index)
+                    if ylabel != "":
+                        name += ": " + ylabel
+                        break
+            names.append(name)
+        return names
+    
+    def visibleSeriesEpisodes(self) -> list:
+        return self.seriesEpisodes() # TODO
+    
+    def setVisibleSeriesEpisodes(self, episodes: list):
+        pass # TODO
+    
+    def visibleSeriesGroups(self) -> list:
+        return self.seriesGroups() # TODO
+    
+    def setVisibleSeriesGroups(self, groups: list):
+        pass # TODO
+    
+    def visibleSeriesNames(self) -> list:
+        return self.seriesNames() # TODO
+    
+    def setVisibleSeriesNames(self, names: list):
+        pass # TODO
+    
     def initUI(self):
-        self._mainLayout = QVBoxLayout(self)
-
         self._toolbar = QToolBar()
-        self._mainLayout.addWidget(self._toolbar)
 
-        self._plotsLayout = QVBoxLayout()
-        plot = PlotWidget2()
-        self._plotsLayout.addWidget(plot, stretch=1)
-        curve = PlotDataItem2(y=np.random.random(100))
-        plot.addItem(curve)
-        roi = LinearRegionItem2(values=[20, 50], orientation='vertical')
-        plot.getViewBox().addItem(roi)
-        roi.setLabelText("huh")
-        label = TextItem2(text='test', color='r', anchor=(0, 0))
-        label.setPos(70, 0.75)
-        plot.getViewBox().addItem(label)
-        plot = PlotWidget2()
-        self._plotsLayout.addWidget(plot, stretch=1)
-        self._mainLayout.addLayout(self._plotsLayout)
+        self._groupPlotsLayout = QVBoxLayout()
+
+        self._mainLayout = QVBoxLayout(self)
+        self._mainLayout.addWidget(self._toolbar)
+        self._mainLayout.addLayout(self._groupPlotsLayout)
     
     def updateUI(self):
-        visiblePlots = [plot for plot in self.plots() if plot.isVisible()]
+        self._updateGroupPlots()
+    
+    def _updateGroupPlots(self):
+        visibleEpisodes = self.visibleSeriesEpisodes()
+        visibleGroups = self.visibleSeriesGroups()
+        visibleNames = self.visibleSeriesNames()
+        groups = self.seriesGroups()
+        plots = self.groupPlots()
+
+        for i, group in enumerate(groups):
+            # group plot
+            if len(plots) > i:
+                plot = plots[i]
+            else:
+                plot = PlotWidget2()
+                self._groupPlotsLayout.addWidget(plot, stretch=1)
+                plots.append(plot)
+            
+            # plot series
+            indexes = self.seriesIndexes(groups=[group], episodes=visibleEpisodes, names=visibleNames)
+            plotDataItems = [item for item in plot.listDataItems() if isinstance(item, PlotDataItem2)]
+            textItems = [item for item in plot.getViewBox().allChildren() if isinstance(item, TextItem2)]
+            plotDataItemCount = 0
+            textItemCount = 0
+            colorIndex = 0
+            for index in indexes:
+                series = self.data[index]
+                x = self.seriesAttr('x', series)
+                y = self.seriesAttr('y', series)
+                if x is None or y is None:
+                    continue
+                
+                if len(plotDataItems) > plotDataItemCount:
+                    # update existing plot data item
+                    plotDataItem = plotDataItems[plotDataItemCount]
+                    plotDataItem.setData(x, y)
+                else:
+                    # add new plot data item
+                    plotDataItem = PlotDataItem2(x, y)
+                    plot.addItem(plotDataItem)
+                    plotDataItems.append(plotDataItem)
+                plotDataItem.seriesDict = series
+                
+                # style
+                style = self.seriesAttr('style', series)
+                colorIndex = plotDataItem.setCustomStyle(style, colorIndex)
+                
+                # axis labels (based on first plot with axis labels)
+                if plotDataItemCount == 0 or plot.getAxis('bottom').labelText == '':
+                    xlabel = self.seriesAttr('xlabel', index)
+                    plot.getAxis('bottom').setLabel(xlabel)
+                if plotDataItemCount == 0 or plot.getAxis('left').labelText == '':
+                    group = self.seriesAttr('group', index)
+                    ylabel = self.seriesAttr('ylabel', index)
+                    if isinstance(group, int):
+                        ylabel = str(group) + ":" + ylabel
+                    plot.getAxis('left').setLabel(ylabel)
+                
+                # text items
+                if 'labels' in series:
+                    for label in series['labels']:
+                        if len(textItems) > textItemCount:
+                            # update existing text item
+                            textItem = textItems[textItemCount]
+                        else:
+                            # add new text item
+                            textItem = TextItem2()
+                            plot.getViewBox().addItem(textItem)
+                            textItems.append(textItem)
+                        textItem.seriesDict = series
+                        textItem.setLabelDict(label)
+                        textItemCount += 1
+                
+                # next plot data item
+                plotDataItemCount += 1
+            
+            # remove extra plot data items
+            while len(plotDataItems) > plotDataItemCount:
+                plotDataItem = plotDataItems.pop()
+                plot.removeItem(plotDataItem)
+                plotDataItem.deleteLater()
+            
+            # remove extra text items
+            while len(textItems) > textItemCount:
+                textItem = textItems.pop()
+                plot.getViewBox().removeItem(textItem)
+                textItem.deleteLater()
+                
+            # show/hide plot
+            if group in visibleGroups:
+                plot.show()
+            else:
+                plot.hide()
+        
+        # remove extra plots
+        while len(plots) > len(groups):
+            i = len(plots) - 1
+            self._groupPlotsLayout.takeAt(i)
+            plot = plots.pop(i)
+            plot.deleteLater()
+
+        # left align visible plot axes
+        visiblePlots = [plot for plot in plots if plot.isVisible()]
         leftAxisWidths = [plot.getAxis('left').width() for plot in visiblePlots]
         for plot in visiblePlots:
-            # left-align plot axes
             plot.getAxis('left').setWidth(max(leftAxisWidths))
-            # update ROI label positions
-            rois = [item for item in plot.getViewBox().allChildren() if isinstance(item, LinearRegionItem2)]
-            for roi in rois:
-                roi.updateLabelPos()
+
+        # link x-axis
+        # TODO: link based on xlink attr?
+        for i in range(1, len(plots)):
+            plots[i].setXLink(plots[0])
     
-    def plots(self):
-        widgets = [self._plotsLayout.itemAt(i).widget() for i in range(self._plotsLayout.count())]
+    def groupPlots(self):
+        widgets = [self._groupPlotsLayout.itemAt(i).widget() for i in range(self._groupPlotsLayout.count())]
         plots = [widget for widget in widgets if isinstance(widget, PlotWidget2)]
         return plots
 
@@ -122,6 +434,18 @@ class PlotWidget2(pg.PlotWidget):
         kwargs['viewBox'] = ViewBox2()
         pg.PlotWidget.__init__(self, *args, **kwargs)
 
+        # colormap (for default line colors)
+        self.colormap = [
+            [0, 113.9850, 188.9550],
+            [216.7500, 82.8750, 24.9900],
+            [236.8950, 176.9700, 31.8750],
+            [125.9700, 46.9200, 141.7800],
+            [118.8300, 171.8700, 47.9400],
+            [76.7550, 189.9750, 237.9150],
+            [161.9250, 19.8900, 46.9200]
+        ]
+        self.colorIndex = 0
+
 
 class ViewBox2(pg.ViewBox):
     """ pg.ViewBox with custom context menu for measuring and curve fitting. """
@@ -130,6 +454,8 @@ class ViewBox2(pg.ViewBox):
         pg.ViewBox.__init__(self, *args, **kwargs)
 
         self._initContextMenu()
+
+        self._isDrawingROIs = False
 
         self.sigTransformChanged.connect(self._onViewChanged)
         self.sigResized.connect(self._onViewChanged)
@@ -140,7 +466,56 @@ class ViewBox2(pg.ViewBox):
     def getPlotWidget(self):
         return self.getViewWidget()
     
+    def mousePressEvent(self, event):
+        if self._isDrawingROIs:
+            if event.button() == Qt.LeftButton:
+                posInAxes = self.mapSceneToView(self.mapToScene(event.pos()))
+                if self._roiOrientation == "vertical":
+                    posAlongAxis = posInAxes.x()
+                elif self._roiOrientation == "horizontal":
+                    posAlongAxis = posInAxes.y()
+                self._roiStartPos = posAlongAxis
+            else:
+                self.stopDrawingROIs()
+            event.accept()
+            return
+        pg.ViewBox.mousePressEvent(self, event)
+    
+    def mouseReleaseEvent(self, event):
+        if self._isDrawingROIs:
+            if event.button() == Qt.LeftButton:
+                self._roi = None
+                event.accept()
+                return
+        pg.ViewBox.mouseReleaseEvent(self, event)
+    
+    def mouseMoveEvent(self, event):
+        if self._isDrawingROIs:
+            if event.buttons() & Qt.LeftButton:
+                posInAxes = self.mapSceneToView(self.mapToScene(event.pos()))
+                if self._roiOrientation == "vertical":
+                    posAlongAxis = posInAxes.x()
+                elif self._roiOrientation == "horizontal":
+                    posAlongAxis = posInAxes.y()
+                limits = sorted([self._roiStartPos, posAlongAxis])
+                if self._roi is None:
+                    self._roi = LinearRegionItem2(orientation=self._roiOrientation, values=limits)
+                    self.addItem(self._roi)
+                else:
+                    self._roi.setRegion(limits)
+                event.accept()
+                return
+        pg.ViewBox.mouseMoveEvent(self, event)
+    
     def _initContextMenu(self):
+        self._roiMenu = QMenu("ROIs")
+        self._roiMenu.addAction("Draw X-Axis ROIs", lambda: self.startDrawingROIs(orientation="vertical"))
+        self._roiMenu.addSection(" ")
+        self._roiMenu.addAction("Hide All", self.hideROIs)
+        self._roiMenu.addAction("Show All", self.showROIs)
+        self._roiMenu.addSection(" ")
+        self._roiMenu.addAction("Delete All", self.deleteROIs)
+
         self._measureMenu = QMenu("Measure")
         self._measureMenu.addAction("Mean", lambda: self.measure(measurementType="mean"))
         self._measureMenu.addAction("Median", lambda: self.measure(measurementType="median"))
@@ -159,6 +534,8 @@ class ViewBox2(pg.ViewBox):
 
         # append to default context menu
         self.menu.addSection(" ")
+        self.menu.addMenu(self._roiMenu)
+        self.menu.addSection(" ")
         self.menu.addMenu(self._measureMenu)
         self.menu.addMenu(self._curveFitMenu)
         self.menu.addSection(" ")
@@ -168,6 +545,31 @@ class ViewBox2(pg.ViewBox):
             if isinstance(item, LinearRegionItem2):
                 # reposition ROI label
                 item.updateLabelPos()
+    
+    def startDrawingROIs(self, orientation="vertical"):
+        self._isDrawingROIs = True
+        self._roiOrientation = orientation
+        self._roi = None
+
+    def stopDrawingROIs(self):
+        self._isDrawingROIs = False
+        self._roi = None
+    
+    def hideROIs(self):
+        for item in self.allChildren():
+            if isinstance(item, LinearRegionItem2):
+                item.setVisible(False)
+    
+    def showROIs(self):
+        for item in self.allChildren():
+            if isinstance(item, LinearRegionItem2):
+                item.setVisible(True)
+    
+    def deleteROIs(self):
+        for item in self.allChildren():
+            if isinstance(item, LinearRegionItem2):
+                self.removeItem(item)
+                item.deleteLater()
 
 
 class PlotDataItem2(pg.PlotDataItem):
@@ -176,10 +578,13 @@ class PlotDataItem2(pg.PlotDataItem):
     def __init__(self, *args, **kwargs):
         pg.PlotDataItem.__init__(self, *args, **kwargs)
 
+        self.seriesDict = None
+
         self.menu = None
     
     def _delete(self):
-        pass # TODO
+        self.getViewBox().removeItem(self)
+        self.deleteLater()
 
     def shape(self):
         return self.curve.shape()
@@ -187,11 +592,87 @@ class PlotDataItem2(pg.PlotDataItem):
     def boundingRect(self):
         return self.shape().boundingRect()
     
+    def setName(self, name):
+        self.opts['name'] = name
+    
+    def setCustomStyle(self, style: dict, colorIndex=0):
+        plot = self.getViewBox().getPlotWidget()
+        tsa = plot.parentWidget()
+
+        # color
+        color = tsa.styleAttr(style, 'color')
+        if color is not None:
+            color = str2color(color)
+        if color is None or (len(color) == 4 and color[3] == 0):
+            colormap = plot.colormap
+            color = colormap[colorIndex % len(colormap)]
+            color = [int(c) for c in color]
+            if len(color) == 3:
+                color.append(255)
+            color = tuple(color)
+            colorIndex += 1
+
+        # line
+        lineStyle = tsa.styleAttr(style, 'linestyle')
+        if not isinstance(lineStyle, int):
+            lineStyles = {
+                '-': Qt.SolidLine, '--': Qt.DashLine, ':': Qt.DotLine, '-.': Qt.DashDotLine, 
+                'none': None, '': None, None: Qt.SolidLine
+            }
+            lineStyle = lineStyles[lineStyle]
+
+        lineWidth = tsa.styleAttr(style, 'linewidth')
+        if lineWidth is None:
+            lineWidth = 2
+        else:
+            lineWidth = float(lineWidth)
+        
+        if lineStyle is None:
+            linePen = None
+        else:
+            linePen = pg.mkPen(color=color, width=lineWidth, style=lineStyle)
+        self.setPen(linePen)
+
+        # symbol
+        symbol = tsa.styleAttr(style, 'marker')
+        self.setSymbol(symbol)
+        
+        symbolSize = tsa.styleAttr(style, 'markersize')
+        if symbolSize is None:
+            symbolSize = 10
+        else:
+            symbolSize = float(symbolSize)
+        self.setSymbolSize(symbolSize)
+
+        symbolEdgeWidth = tsa.styleAttr(style, 'markeredgewidth')
+        if symbolEdgeWidth is None:
+            symbolEdgeWidth = lineWidth
+        else:
+            symbolEdgeWidth = float(symbolEdgeWidth)
+        
+        symbolEdgeColor = tsa.styleAttr(style, 'markeredgecolor')
+        if symbolEdgeColor is None:
+            symbolEdgeColor = color
+        else:
+            symbolEdgeColor = str2color(symbolEdgeColor)
+        
+        symbolPen = pg.mkPen(color=symbolEdgeColor, width=symbolEdgeWidth)
+        self.setSymbolPen(symbolPen)
+
+        symbolFaceColor = tsa.styleAttr(style, 'markerfacecolor')
+        if symbolFaceColor is None:
+            symbolFaceColor = symbolEdgeColor[:3] + (0,)
+        else:
+            symbolFaceColor = str2color(symbolFaceColor)
+        self.setSymbolBrush(symbolFaceColor)
+        
+        return colorIndex
+    
     def mouseClickEvent(self, event):
         if event.button() == Qt.RightButton:
-            if self.boundingRect().contains(event.pos()):
+            if self.curve.mouseShape().contains(event.pos()):
                 if self.raiseContextMenu(event):
-                    print(self.getViewBox())
+                    self._lastClickPos = self.mapToView(event.pos())
                     event.accept()
     
     def raiseContextMenu(self, event):
@@ -205,8 +686,14 @@ class PlotDataItem2(pg.PlotDataItem):
         return True
     
     def getContextMenus(self, event=None):
-        self._dataMenu = QMenu("Data Series")
-        self._dataMenu.addAction("Edit", self.editDialog)
+        name = self.name()
+        if name is None:
+            name = "Data Series"
+        self._dataMenu = QMenu(name)
+        self._dataMenu.addAction("Rename", self.editNameDialog)
+        self._dataMenu.addAction("Edit Style", self.editStyleDialog)
+        self._dataMenu.addSection(" ")
+        self._dataMenu.addAction("Add Label", self.addTextItem)
         self._dataMenu.addSection(" ")
         self._dataMenu.addAction("Delete", self._delete)
 
@@ -215,8 +702,229 @@ class PlotDataItem2(pg.PlotDataItem):
         self.menu.addSection(" ")
         return self.menu
     
-    def editDialog(self):
-        pass # TODO
+    def editNameDialog(self):
+        name = self.name()
+        if name is None:
+            name = ''
+        name, ok = QInputDialog.getText(self.getViewBox().getPlotWidget(), "Series Name", "Name:", text=name)
+        if not ok:
+            return
+        name = name.strip()
+        if name == '':
+            name = None
+
+        # update this widget
+        self.setName(name)
+
+        # update series dict
+        if self.seriesDict is not None:
+            if name is None:
+                if 'name' in self.seriesDict:
+                    del self.seriesDict['name']
+                else:
+                    self.seriesDict['name'] = name
+    
+    def editStyleDialog(self):
+        try:
+            tsa = self.getViewBox().getPlotWidget().parentWidget()
+        except:
+            tsa = None
+        if (tsa is not None) and (self.seriesDict is not None):
+            style = tsa.seriesAttr('style', self.seriesDict)
+            if style is None:
+                style = {}
+        else:
+            style = None
+        
+        dlg = QDialog()
+        form = QFormLayout(dlg)
+
+        # QPen, QBrush
+        pen = pg.mkPen(self.opts['pen'])
+        symbolPen = pg.mkPen(self.opts['symbolPen'])
+        symbolBrush = pg.mkBrush(self.opts['symbolBrush'])
+
+        # Qt.PenStyle.NoPen = 0
+        # Qt.PenStyle.SolidLine = 1
+        # Qt.PenStyle.DashLine = 2
+        # Qt.PenStyle.DotLine = 3
+        # Qt.PenStyle.DashDotLine = 4
+        lineStyleComboBox = QComboBox()
+        lineStyleComboBox.addItems(['No Line', 'Solid Line', 'Dash Line', 'Dot Line', 'Dash Dot Line'])
+        lineStyleComboBox.setCurrentIndex(pen.style())  # Set via a Qt.PenStyle enum value.
+        form.addRow('Line Style', lineStyleComboBox)
+
+        lineWidthSpinBox = QDoubleSpinBox()
+        lineWidthSpinBox.setMinimum(0)
+        lineWidthSpinBox.setValue(pen.widthF())
+        form.addRow('Line Width', lineWidthSpinBox)
+
+        if style is not None:
+            color = tsa.styleAttr(style, 'color')
+            if color is None:
+                color = QColor('transparent')
+            else:
+                color = QColor(*color)
+        else:
+            color = pen.color()
+        colorButton = ColorButton(color)
+        defaultColorButton = QPushButton('Default')
+        defaultColorButton.setToolTip('Use current color in colormap')
+        defaultColorButton.clicked.connect(lambda: colorButton.setColor(QColor('transparent')))
+        colorLayout = QHBoxLayout()
+        colorLayout.setContentsMargins(0, 0, 0, 0)
+        colorLayout.setSpacing(5)
+        colorLayout.addWidget(colorButton)
+        colorLayout.addWidget(defaultColorButton)
+        form.addRow('Color', colorLayout)
+
+        markerComboBox = QComboBox()
+        markers = [None, 'o', 't', 't1', 't2', 't3', 's', 'p', 'h', 'star', '+', 'd', 'x']
+        markerComboBox.addItems([
+            'None', 'Circle', 'Triangle Down', 'Triangle Up', 'Triangle Right', 'Triangle Left', 'Square', 
+            'Pentagon', 'Hexagon', 'Star', 'Plus', 'Prism', 'Cross'])
+        markerComboBox.setCurrentIndex(markers.index(self.opts['symbol']))
+        form.addRow('Marker', markerComboBox)
+
+        markerSizeSpinBox = QDoubleSpinBox()
+        markerSizeSpinBox.setMinimum(0)
+        markerSizeSpinBox.setValue(self.opts['symbolSize'])
+        form.addRow('Marker Size', markerSizeSpinBox)
+
+        markerEdgeWidthSpinBox = QDoubleSpinBox()
+        markerEdgeWidthSpinBox.setMinimum(0)
+        markerEdgeWidthSpinBox.setValue(symbolPen.widthF())
+        form.addRow('Marker Edge Width', markerEdgeWidthSpinBox)
+
+        if style is not None:
+            markerEdgeColor = tsa.styleAttr(style, 'markeredgecolor')
+            if markerEdgeColor is None:
+                markerEdgeColor = QColor('transparent')
+            else:
+                markerEdgeColor = QColor(*markerEdgeColor)
+        else:
+            markerEdgeColor = symbolPen.color()
+        markerEdgeColorButton = ColorButton(markerEdgeColor)
+        defaultMarkerEdgeColorButton = QPushButton('Default')
+        defaultMarkerEdgeColorButton.setToolTip('Same as color')
+        defaultMarkerEdgeColorButton.clicked.connect(lambda: markerEdgeColorButton.setColor(QColor('transparent')))
+        markerEdgeColorLayout = QHBoxLayout()
+        markerEdgeColorLayout.setContentsMargins(0, 0, 0, 0)
+        markerEdgeColorLayout.setSpacing(5)
+        markerEdgeColorLayout.addWidget(markerEdgeColorButton)
+        markerEdgeColorLayout.addWidget(defaultMarkerEdgeColorButton)
+        form.addRow('Marker Edge Color', markerEdgeColorLayout)
+
+        if style is not None:
+            markerFaceColor = tsa.styleAttr(style, 'markerfacecolor')
+            if markerFaceColor is None:
+                markerFaceColor = QColor('transparent')
+            else:
+                markerFaceColor = QColor(*markerFaceColor)
+        else:
+            markerFaceColor = symbolBrush.color()
+        markerFaceColorButton = ColorButton(markerFaceColor)
+        defaultMarkerFaceColorButton = QPushButton('Default')
+        defaultMarkerFaceColorButton.setToolTip('Transparent')
+        defaultMarkerFaceColorButton.clicked.connect(lambda: markerFaceColorButton.setColor(QColor('transparent')))
+        markerFaceColorLayout = QHBoxLayout()
+        markerFaceColorLayout.setContentsMargins(0, 0, 0, 0)
+        markerFaceColorLayout.setSpacing(5)
+        markerFaceColorLayout.addWidget(markerFaceColorButton)
+        markerFaceColorLayout.addWidget(defaultMarkerFaceColorButton)
+        form.addRow('Marker Edge Color', markerFaceColorLayout)
+
+        btns = QDialogButtonBox()
+        btns.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        form.addRow(btns)
+
+        dlg.setWindowModality(Qt.ApplicationModal)
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        
+        # apply style
+        linestyle = lineStyleComboBox.currentIndex()
+        lineWidth = lineWidthSpinBox.value()
+        color = colorButton.color()
+        if color == QColor('transparent'):
+            color = None
+        marker = markers[markerComboBox.currentIndex()]
+        markerSize = markerSizeSpinBox.value()
+        markerEdgeWidth = markerEdgeWidthSpinBox.value()
+        markerEdgeColor = markerEdgeColorButton.color()
+        if markerEdgeColor == QColor('transparent'):
+            markerEdgeColor = None
+        markerFaceColor = markerFaceColorButton.color()
+        if markerFaceColor == QColor('transparent'):
+            markerFaceColor = None
+
+        pen.setStyle(linestyle)
+        pen.setWidthF(lineWidth)
+        if color is not None:
+            pen.setColor(color)
+        self.setPen(pen)
+
+        self.setSymbol(marker)
+        self.setSymbolSize(markerSize)
+
+        symbolPen.setWidthF(markerEdgeWidth)
+        if markerEdgeColor is not None:
+            symbolPen.setColor(markerEdgeColor)
+        else:
+            symbolPen.setColor(pen.color())
+        self.setSymbolPen(symbolPen)
+
+        if markerFaceColor is not None:
+            symbolBrush.setColor(markerFaceColor)
+        else:
+            r = symbolPen.color().red()
+            g = symbolPen.color().green()
+            b = symbolPen.color().blue()
+            symbolBrush.setColor(QColor(r, g, b, 0))
+        self.setSymbolBrush(symbolBrush)
+
+        # update style dict
+        if style is None:
+            return
+
+        lineStyles = ['none', '-', '--', ':', '-.']
+        tsa.setStyleAttr(style, 'linestyle', lineStyles[linestyle])
+        tsa.setStyleAttr(style, 'linewidth', lineWidth)
+        if colorButton.colorWasPicked():
+            if color:
+                color = color.red(), color.green(), color.blue(), color.alpha()
+            tsa.setStyleAttr(style, 'color', color)
+        tsa.setStyleAttr(style, 'marker', marker)
+        tsa.setStyleAttr(style, 'markersize', markerSize)
+        tsa.setStyleAttr(style, 'markeredgewidth', markerEdgeWidth)
+        if markerEdgeColorButton.colorWasPicked():
+            if markerEdgeColor:
+                markerEdgeColor = markerEdgeColor.red(), markerEdgeColor.green(), markerEdgeColor.blue(), markerEdgeColor.alpha()
+            tsa.setStyleAttr(style, 'markeredgecolor', markerEdgeColor)
+        if markerFaceColorButton.colorWasPicked():
+            if markerFaceColor:
+                markerFaceColor = markerFaceColor.red(), markerFaceColor.green(), markerFaceColor.blue(), markerFaceColor.alpha()
+            tsa.setStyleAttr(style, 'markerfacecolor', markerFaceColor)
+        tsa.setSeriesAttr('style', style, self.seriesDict)
+    
+    def addTextItem(self):
+        if self.seriesDict is None:
+            return
+        textItem = TextItem2()
+        self.getViewBox().addItem(textItem)
+        textItem.seriesDict = self.seriesDict
+        x = self._lastClickPos.x()
+        y = self._lastClickPos.y()
+        labelDict = {'x': x, 'y': y, 'text': ''}
+        if 'labels' not in self.seriesDict:
+            self.seriesDict['labels'] = [labelDict]
+        else:
+            self.seriesDict['labels'].append(labelDict)
+        textItem.setLabelDict(labelDict)
+        textItem.editDialog()
+        print(self.seriesDict)
 
 
 class LinearRegionItem2(pg.LinearRegionItem):
@@ -225,18 +933,23 @@ class LinearRegionItem2(pg.LinearRegionItem):
     def __init__(self, *args, **kwargs):
         pg.LinearRegionItem.__init__(self, *args, **kwargs)
 
-        self._labelItem = None
+        # self._labelItem = None
         self.menu = None
 
-        self.sigRegionChanged.connect(self._onRegionChanged)
+        # self.sigRegionChanged.connect(self._onRegionChanged)
     
     def _delete(self):
-        self.removeLabel()
+        # self.removeLabel()
         self.getViewBox().removeItem(self)
         self.deleteLater()
     
-    def _onRegionChanged(self):
-        self.updateLabelPos()
+    def _setVisible(self, isVisible: bool):
+        self.setVisible(isVisible)
+        # if self._labelItem:
+        #     self._labelItem.setVisible(isVisible)
+    
+    # def _onRegionChanged(self):
+    #     self.updateLabelPos()
     
     def mouseClickEvent(self, event):
         if event.button() == Qt.RightButton:
@@ -256,7 +969,9 @@ class LinearRegionItem2(pg.LinearRegionItem):
     
     def getContextMenus(self, event=None):
         self._roiMenu = QMenu("ROI")
-        self._roiMenu.addAction("Edit", self.editDialog)
+        self._roiMenu.addAction("Set Limits", self.editDialog)
+        self._roiMenu.addSection(" ")
+        self._roiMenu.addAction("Hide", lambda: self._setVisible(False))
         self._roiMenu.addSection(" ")
         self._roiMenu.addAction("Delete", self._delete)
 
@@ -265,59 +980,59 @@ class LinearRegionItem2(pg.LinearRegionItem):
         self.menu.addSection(" ")
         return self.menu
     
-    def labelText(self):
-        try:
-            return self._labelItem.text
-        except:
-            return ''
+    # def labelText(self):
+    #     try:
+    #         return self._labelItem.text
+    #     except:
+    #         return ''
     
-    def setLabelText(self, text):
-        if text == '':
-            self.removeLabel()
-            return
-        if self._labelItem is None:
-            self._labelItem = pg.LabelItem(text=text, size="8pt", color=(0,0,0,128))
-            self._labelItem.setParentItem(self.getViewBox())
-            self.updateLabelPos()
-        else:
-            self._labelItem.setText(text)
+    # def setLabelText(self, text):
+    #     if text == '':
+    #         self.removeLabel()
+    #         return
+    #     if self._labelItem is None:
+    #         self._labelItem = pg.LabelItem(text=text, size="8pt", color=(0,0,0,128))
+    #         self._labelItem.setParentItem(self.getViewBox())
+    #         self.updateLabelPos()
+    #     else:
+    #         self._labelItem.setText(text)
     
-    def removeLabel(self):
-        if self._labelItem is not None:
-            self.getViewBox().removeItem(self._labelItem)
-            self._labelItem = None
+    # def removeLabel(self):
+    #     if self._labelItem is not None:
+    #         self.getViewBox().removeItem(self._labelItem)
+    #         self._labelItem = None
     
-    def updateLabelPos(self):
-        """ place label in upper left of visible portion of region """
-        if self._labelItem is None:
-            return
-        viewBox = self.getViewBox()
-        if self.orientation == 'vertical':
-            xViewMin, xViewMax = viewBox.viewRange()[0]
-            xRegionMin, xRegionMax = self.getRegion()
-            if xRegionMin >= xViewMax or xRegionMax <= xViewMin:
-                # hide the label if the region is not visible
-                self._labelItem.setVisible(False)
-                return
-            xFraction = (max(xRegionMin, xViewMin) - xViewMin) / (xViewMax - xViewMin)
-            # itemPos=(0,0) => anchor top left of label
-            # parentPos=(x,0) => place label anchor at top left of portion of region in view
-            # offset=(2,2) => offset label 2 pixels right and 2 pixels down
-            self._labelItem.anchor(itemPos=(0,0), parentPos=(xFraction,0), offset=(2,2))
-            self._labelItem.setVisible(True)
-        elif self.orientation == 'horizontal':
-            yViewMin, yViewMax = viewBox.viewRange()[1]
-            yRegionMin, yRegionMax = self.getRegion()
-            if yRegionMin >= yViewMax or yRegionMax <= yViewMin:
-                # hide the label if the region is not visible
-                self._labelItem.setVisible(False)
-                return
-            yFraction = (yViewMax - min(yRegionMax, yViewMax)) / (yViewMax - yViewMin)
-            # itemPos=(0,0) => anchor top left of label
-            # parentPos=(0,y) => place label anchor at top left of portion of region in view
-            # offset=(2,2) => offset label 2 pixels right and 2 pixels down
-            self._labelItem.anchor(itemPos=(0,0), parentPos=(0,yFraction), offset=(2,2))
-            self._labelItem.setVisible(True)
+    # def updateLabelPos(self):
+    #     """ place label in upper left of visible portion of region """
+    #     if self._labelItem is None:
+    #         return
+    #     viewBox = self.getViewBox()
+    #     if self.orientation == 'vertical':
+    #         xViewMin, xViewMax = viewBox.viewRange()[0]
+    #         xRegionMin, xRegionMax = self.getRegion()
+    #         if xRegionMin >= xViewMax or xRegionMax <= xViewMin:
+    #             # hide the label if the region is not visible
+    #             self._labelItem.setVisible(False)
+    #             return
+    #         xFraction = (max(xRegionMin, xViewMin) - xViewMin) / (xViewMax - xViewMin)
+    #         # itemPos=(0,0) => anchor top left of label
+    #         # parentPos=(x,0) => place label anchor at top left of portion of region in view
+    #         # offset=(2,2) => offset label 2 pixels right and 2 pixels down
+    #         self._labelItem.anchor(itemPos=(0,0), parentPos=(xFraction,0), offset=(2,2))
+    #         self._labelItem.setVisible(True)
+    #     elif self.orientation == 'horizontal':
+    #         yViewMin, yViewMax = viewBox.viewRange()[1]
+    #         yRegionMin, yRegionMax = self.getRegion()
+    #         if yRegionMin >= yViewMax or yRegionMax <= yViewMin:
+    #             # hide the label if the region is not visible
+    #             self._labelItem.setVisible(False)
+    #             return
+    #         yFraction = (yViewMax - min(yRegionMax, yViewMax)) / (yViewMax - yViewMin)
+    #         # itemPos=(0,0) => anchor top left of label
+    #         # parentPos=(0,y) => place label anchor at top left of portion of region in view
+    #         # offset=(2,2) => offset label 2 pixels right and 2 pixels down
+    #         self._labelItem.anchor(itemPos=(0,0), parentPos=(0,yFraction), offset=(2,2))
+    #         self._labelItem.setVisible(True)
     
     def editDialog(self):
         dlg = QDialog()
@@ -325,7 +1040,7 @@ class LinearRegionItem2(pg.LinearRegionItem):
 
         limits = self.getRegion()
         form.addRow('Limits', QLineEdit(str(limits[0])+", "+str(limits[1])))
-        form.addRow('Label', QLineEdit(self.labelText()))
+        # form.addRow('Label', QLineEdit(self.labelText()))
 
         btns = QDialogButtonBox()
         btns.setStandardButtons(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
@@ -337,8 +1052,8 @@ class LinearRegionItem2(pg.LinearRegionItem):
         if dlg.exec_() == QDialog.Accepted:
             limits = [float(value) for value in form.itemAt(0, 1).widget().text().split(',')]
             self.setRegion(sorted(limits))
-            text = form.itemAt(1, 1).widget().text()
-            self.setLabelText(text)
+            # text = form.itemAt(1, 1).widget().text()
+            # self.setLabelText(text)
 
 
 class TextItem2(pg.TextItem):
@@ -346,8 +1061,45 @@ class TextItem2(pg.TextItem):
 
     def __init__(self, *args, **kwargs):
         pg.TextItem.__init__(self, *args, **kwargs)
+
+        self.seriesDict = None
+        self.labelDict = None
         
         self.menu = None
+
+        self.setColor((0,0,0,255))
+    
+    def _delete(self):
+        if self.seriesDict is not None:
+            if self.labelDict is not None:
+                self.seriesDict['labels'].remove(self.labelDict)
+        self.getViewBox().removeItem(self)
+        self.deleteLater()
+    
+    def setLabelDict(self, labelDict: dict):
+        self.labelDict = labelDict
+
+        self.setPlainText(labelDict['text'])
+
+        x = labelDict.get('x', self.pos().x())
+        y = labelDict.get('y', self.pos().y())
+        self.setPos(x, y)
+
+        if 'anchor' in labelDict:
+            try:
+                halign, valign = labelDict['anchor']
+                self.setAnchorAlignment(halign, valign)
+            except:
+                pass
+
+        if 'color' in labelDict:
+            self.setColor(labelDict['color'])
+
+        if 'angle' in labelDict:
+            self.setAngle(labelDict['angle'])
+
+        if 'font-size' in labelDict:
+            self.textItem.font().setPointSize(labelDict['font-size'])
     
     def mouseClickEvent(self, event):
         if event.button() == Qt.RightButton:
@@ -364,7 +1116,6 @@ class TextItem2(pg.TextItem):
                 return
             if self._dragOffset is not None:
                 self.setPos(self.getViewBox().mapSceneToView(self.mapToScene(event.pos())) + self._dragOffset)
-                print(self.getViewBox())
                 event.accept()
     
     def raiseContextMenu(self, event):
@@ -381,7 +1132,7 @@ class TextItem2(pg.TextItem):
         self._labelMenu = QMenu("Label")
         self._labelMenu.addAction("Edit", self.editDialog)
         self._labelMenu.addSection(" ")
-        self._labelMenu.addAction("Delete", self.deleteLater)
+        self._labelMenu.addAction("Delete", self._delete)
 
         self.menu = QMenu()
         self.menu.addMenu(self._labelMenu)
@@ -411,7 +1162,10 @@ class TextItem2(pg.TextItem):
         dlg = QDialog()
         form = QFormLayout(dlg)
 
-        form.addRow('Text', QLineEdit(self.toPlainText()))
+        text = self.toPlainText()
+        textEdit = QTextEdit()
+        textEdit.setPlainText(text)
+        form.addRow('Text', textEdit)
 
         xStr = f'{self.pos().x():.6f}'.rstrip('0').rstrip('.')
         yStr = f'{self.pos().y():.6f}'.rstrip('0').rstrip('.')
@@ -481,8 +1235,6 @@ class TextItem2(pg.TextItem):
         angleSpinBox.setSuffix(' degrees')
         form.addRow('Rotation', angleSpinBox)
 
-        form.addRow('Font Name', QLineEdit(self.textItem.font().family()))
-
         ptSizeSpinBox = QSpinBox()
         ptSizeSpinBox.setValue(self.textItem.font().pointSize())
         ptSizeSpinBox.setMinimum(1)
@@ -496,37 +1248,58 @@ class TextItem2(pg.TextItem):
         form.addRow(btns)
 
         dlg.setWindowModality(Qt.ApplicationModal)
-        if dlg.exec_() == QDialog.Accepted:
-            text = form.itemAt(0, 1).widget().text()
-            self.setPlainText(text)
+        if dlg.exec_() != QDialog.Accepted:
+            if text == '':
+                self._delete()
+            return
+        
+        text = form.itemAt(0, 1).widget().toPlainText()
+        if text == '':
+            self._delete()
+            return
+        self.setPlainText(text)
 
-            x, y = [float(value) for value in form.itemAt(1, 1).widget().text().split(',')]
-            self.setPos(x, y)
+        x, y = [float(value) for value in form.itemAt(1, 1).widget().text().split(',')]
+        self.setPos(x, y)
 
-            if halignBtnGroup.checkedButton() is leftAlignBtn:
-                self.anchor[0] = 0
-            elif halignBtnGroup.checkedButton() is centerAlignBtn:
-                self.anchor[0] = 0.5
-            elif halignBtnGroup.checkedButton() is rightAlignBtn:
-                self.anchor[0] = 1
-            if valignBtnGroup.checkedButton() is topAlignBtn:
-                self.anchor[1] = 0
-            elif valignBtnGroup.checkedButton() is middleAlignBtn:
-                self.anchor[1] = 0.5
-            elif valignBtnGroup.checkedButton() is bottomAlignBtn:
-                self.anchor[1] = 1
-            self.updateTextPos()
+        if halignBtnGroup.checkedButton() is leftAlignBtn:
+            self.anchor[0] = 0
+            halign = 'left'
+        elif halignBtnGroup.checkedButton() is centerAlignBtn:
+            self.anchor[0] = 0.5
+            halign = 'center'
+        elif halignBtnGroup.checkedButton() is rightAlignBtn:
+            self.anchor[0] = 1
+            halign = 'right'
+        if valignBtnGroup.checkedButton() is topAlignBtn:
+            self.anchor[1] = 0
+            valign = 'top'
+        elif valignBtnGroup.checkedButton() is middleAlignBtn:
+            self.anchor[1] = 0.5
+            valign = 'middle'
+        elif valignBtnGroup.checkedButton() is bottomAlignBtn:
+            self.anchor[1] = 1
+            valign = 'bottom'
 
-            color = form.itemAt(4, 1).widget().color()
-            self.setColor(color)
+        color = form.itemAt(4, 1).widget().color()
+        self.setColor(color)
 
-            angle = form.itemAt(5, 1).widget().value()
-            self.setAngle(angle)
+        angle = form.itemAt(5, 1).widget().value()
+        self.setAngle(angle)
 
-            fontFamily = form.itemAt(6, 1).widget().text()
-            fontPointSize = form.itemAt(7, 1).widget().value()
-            font = QFont(fontFamily, fontPointSize)
-            self.textItem.setFont(font)
+        fontPointSize = form.itemAt(6, 1).widget().value()
+        self.textItem.font().setPointSize(fontPointSize)
+
+        if self.labelDict is None:
+            return
+        
+        self.labelDict['text'] = text
+        self.labelDict['x'] = x
+        self.labelDict['y'] = y
+        self.labelDict['anchor'] = (halign, valign)
+        self.labelDict['color'] = (color.red(), color.green(), color.blue(), color.alpha())
+        self.labelDict['angle'] = angle
+        self.labelDict['font-size'] = fontPointSize
 
 
 
@@ -548,8 +1321,8 @@ class QtTimeSeriesAnalyzer(QWidget):
     Currently, the following series attributes are used by the UI:
           x: [OPTIONAL] 1D array of x-axis values -OR- sample interval. Defaults to sample indexes if not specified.
           y: [REQUIRED] 1D array of y-axis values.
-     xlabel: [OPTIONAL] x-axis label. !!! Specified per series for future flexibility, but currently should be the same for all series.
-     ylabel: [OPTIONAL] y-axis label. !!! Specified per series for future flexibility, but currently should be the same for all series within each group.
+     xlabel: [OPTIONAL] x-axis label. !!! Should be the same for all series within each group.
+     ylabel: [OPTIONAL] y-axis label. !!! Should be the same for all series within each group.
     episode: [OPTIONAL] Index for, e.g., serial or in-parallel series from the same recording channel.
                         Defaults to index of series within all series having the same group and name.
       group: [OPTIONAL] ID for different types of series (can have different y units).
@@ -2520,28 +3293,41 @@ class DataTableModel(QAbstractTableModel):
                     self._columns.append(attr)
 
 
-class ColorButton(QPushButton):
-    def __init__(self, color=Qt.white):
-        QPushButton.__init__(self)
+class ColorButton(QGroupBox):
+    def __init__(self, color=QColor('transparent')):
+        QGroupBox.__init__(self)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+
+        self.colorButton = QPushButton()
+        self.colorButton.clicked.connect(self.pickColor)
+        self._colorWasPicked = False
+        layout.addWidget(self.colorButton)
+
         self.setColor(color)
-        self.clicked.connect(self.pickColor)
     
-    def color(self):
-        pal = self.palette()
-        return pal.color(QPalette.Button)
+    def color(self) -> QColor:
+        pal = self.colorButton.palette()
+        return pal.brush(QPalette.Button).color()
 
     def setColor(self, color):
         if isinstance(color, str):
             color = str2qcolor(color)
-        pal = self.palette()
-        pal.setColor(QPalette.Button, color)
-        self.setPalette(pal)
-        self.update()
+        pal = self.colorButton.palette()
+        pal.setBrush(QPalette.Button, QBrush(color))
+        self.colorButton.setPalette(pal)
+        self.colorButton.setGraphicsEffect(QGraphicsOpacityEffect(opacity=color.alphaF()))
     
     def pickColor(self):
         color = QColorDialog.getColor(self.color(), None, "Select Color", options=QColorDialog.ShowAlphaChannel)
         if color.isValid():
             self.setColor(color)
+            self._colorWasPicked = True
+    
+    def colorWasPicked(self) -> bool:
+        return self._colorWasPicked
     
 
 # I/O for QtTimeSeriesAnalyzer data
@@ -2643,18 +3429,18 @@ if __name__ == '__main__':
 
     # testing
     # tsa.importHEKA('heka.dat')
-    # tsa.data = []
-    # for i in range(2):
-    #     tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Current, pA", group="I")
-    #     tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Voltage, mV", group="V")
-    # tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Current, pA", group="I", episode=1, name='fit')
-    # tsa.updateUI()
+    tsa.data = []
+    tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Current, pA", group=0, labels=[{'text': 'testing 1', 'x': 3, 'y': 0.5}])
+    tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Voltage, mV", group=1)
+    tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Current, pA", group=0, labels=[{'text': 'testing 2', 'x': 6, 'y': 0.5}])
+    tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Voltage, mV", group=1)
+    tsa.addSeries(y=np.random.random(10), xlabel="Time, s", ylabel="Current, pA", group=0, episode=1, name='fit')
+    tsa.updateUI()
 
     # tsa.open()
 
+
     # Show widget and run application
     tsa.show()
-    tsa.updateUI()
-
     status = app.exec()
     sys.exit(status)
